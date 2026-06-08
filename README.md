@@ -27,7 +27,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Duplicate-row detection.
 - Label balance and label completeness checks.
 - Numeric and categorical drift checks against a reference dataset.
-- JSON and Markdown report output.
+- JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
 
 ## Installation
@@ -69,6 +69,8 @@ dataset-audit-kit audit data.csv \
 ```
 
 Use `--json` if you want machine-readable output for automation.
+
+Use `--html-out report.html` to export a shareable standalone HTML report.
 
 ## Demo
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Sequence
 
 from .core import DatasetAuditor
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print JSON instead of Markdown",
     )
+    audit.add_argument(
+        "--html-out",
+        help="Write an HTML report to the given path",
+        default=None,
+    )
     return parser
 
 
@@ -66,9 +72,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_columns=_parse_columns(args.expected_columns),
     )
 
+    if args.html_out:
+        html_path = Path(args.html_out)
+        html_path.write_text(report.to_html(), encoding="utf-8")
+
     if args.json:
         print(report.to_json())
     else:
         print(report.to_markdown())
-    return 0
 
+    if args.html_out:
+        print(f"HTML report written to {args.html_out}")
+    return 0

@@ -68,6 +68,9 @@ def test_report_serializes_to_json_and_markdown() -> None:
     parsed = json.loads(report.to_json())
     assert parsed["status"] == "pass"
     assert "# Dataset Audit Report" in report.to_markdown()
+    html = report.to_html()
+    assert "<!doctype html>" in html
+    assert "Dataset Audit Report" in html
 
 
 def test_demo_notebook_is_valid_json() -> None:

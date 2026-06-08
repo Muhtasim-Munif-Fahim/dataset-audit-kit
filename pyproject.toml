@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataset-audit-kit"
-version = "0.1.0"
+version = "0.1.1"
 description = "A lightweight dataset validation toolkit for schema, missingness, and drift checks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,4 +52,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

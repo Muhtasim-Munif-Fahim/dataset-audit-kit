@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -91,6 +92,109 @@ class AuditReport:
             lines.extend(["", "_No issues found._"])
 
         return "\n".join(lines)
+
+    def to_html(self) -> str:
+        """Render the report as a standalone HTML document."""
+
+        def esc(value: object) -> str:
+            return html.escape(str(value), quote=True)
+
+        issue_rows = []
+        if self.issues:
+            for issue in self.issues:
+                issue_rows.append(
+                    "<tr>"
+                    f"<td>{esc(issue.severity.upper())}</td>"
+                    f"<td>{esc(issue.check)}</td>"
+                    f"<td>{esc(issue.column or '')}</td>"
+                    f"<td>{esc(issue.message)}</td>"
+                    f"<td>{esc(issue.observed if issue.observed is not None else '')}</td>"
+                    f"<td>{esc(issue.threshold if issue.threshold is not None else '')}</td>"
+                    "</tr>"
+                )
+        else:
+            issue_rows.append('<tr><td colspan="6"><em>No issues found.</em></td></tr>')
+
+        missingness_rows = []
+        for column, ratio in self.missingness.items():
+            missingness_rows.append(f"<tr><td>{esc(column)}</td><td>{ratio:.1%}</td></tr>")
+
+        drift_rows = []
+        for column, score in self.drift_scores.items():
+            drift_rows.append(f"<tr><td>{esc(column)}</td><td>{score:.3f}</td></tr>")
+
+        label_rows = []
+        for label, count in self.label_distribution.items():
+            label_rows.append(f"<tr><td>{esc(label)}</td><td>{count}</td></tr>")
+
+        sections = [
+            "<!doctype html>",
+            "<html lang=\"en\">",
+            "<head>",
+            '<meta charset="utf-8">',
+            '<meta name="viewport" content="width=device-width, initial-scale=1">',
+            "<title>Dataset Audit Report</title>",
+            "<style>",
+            "body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:32px;line-height:1.5;color:#1f2937;background:#f8fafc;}",
+            "main{max-width:960px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:32px;box-shadow:0 8px 24px rgba(15,23,42,.06);}",
+            "h1,h2{line-height:1.2;}",
+            "table{width:100%;border-collapse:collapse;margin:12px 0 24px;}",
+            "th,td{border:1px solid #e5e7eb;padding:10px 12px;text-align:left;vertical-align:top;}",
+            "th{background:#f9fafb;}",
+            ".metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0 24px;}",
+            ".metric{border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#f9fafb;}",
+            ".metric strong{display:block;font-size:1.4rem;margin-top:4px;}",
+            ".pass{color:#166534;}",
+            ".warn{color:#b45309;}",
+            ".muted{color:#6b7280;}",
+            "</style>",
+            "</head>",
+            "<body>",
+            "<main>",
+            "<h1>Dataset Audit Report</h1>",
+            f'<p class="muted">Status: <strong class="{esc(self.status)}">{esc(self.status)}</strong></p>',
+            '<div class="metrics">',
+            f'<div class="metric"><span>Rows</span><strong>{self.rows}</strong></div>',
+            f'<div class="metric"><span>Columns</span><strong>{self.columns}</strong></div>',
+            f'<div class="metric"><span>Duplicate rows</span><strong>{self.duplicate_rows}</strong></div>',
+            f'<div class="metric"><span>Missing cells</span><strong>{self.missing_cells}</strong></div>',
+            "</div>",
+        ]
+
+        if label_rows:
+            sections.extend([
+                "<h2>Label distribution</h2>",
+                "<table><thead><tr><th>Label</th><th>Count</th></tr></thead><tbody>",
+                *label_rows,
+                "</tbody></table>",
+            ])
+
+        if missingness_rows:
+            sections.extend([
+                "<h2>Missingness</h2>",
+                "<table><thead><tr><th>Column</th><th>Missing share</th></tr></thead><tbody>",
+                *missingness_rows,
+                "</tbody></table>",
+            ])
+
+        if drift_rows:
+            sections.extend([
+                "<h2>Drift scores</h2>",
+                "<table><thead><tr><th>Column</th><th>Score</th></tr></thead><tbody>",
+                *drift_rows,
+                "</tbody></table>",
+            ])
+
+        sections.extend([
+            "<h2>Issues</h2>",
+            '<table><thead><tr><th>Severity</th><th>Check</th><th>Column</th><th>Message</th><th>Observed</th><th>Threshold</th></tr></thead><tbody>',
+            *issue_rows,
+            "</tbody></table>",
+            "</main>",
+            "</body>",
+            "</html>",
+        ])
+        return "\n".join(sections)
 
 
 class DatasetAuditor:
