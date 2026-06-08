@@ -94,8 +94,8 @@ The repository includes a fully self-contained demo based on the public Iris dat
 
 - [Add HTML report export](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/1)
 - [Add Parquet and JSONL loaders](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/2)
-- Add configurable per-column validation rules.
-- Add a pre-commit hook or GitHub Action that blocks invalid uploads.
+- [Add configurable per-column validation rules](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/3)
+- [Add CI check for auditable sample datasets](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/4)
 
 ## Tests
 
