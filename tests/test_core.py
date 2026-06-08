@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from dataset_audit_kit import DatasetAuditor
 
@@ -71,6 +72,48 @@ def test_report_serializes_to_json_and_markdown() -> None:
     html = report.to_html()
     assert "<!doctype html>" in html
     assert "Dataset Audit Report" in html
+
+
+def test_audit_file_supports_jsonl_and_parquet(tmp_path) -> None:
+    data = pd.DataFrame(
+        {
+            "feature_a": [1.0, 2.0, 3.0],
+            "feature_b": ["x", "y", "z"],
+            "target": [0, 1, 1],
+        }
+    )
+    reference = pd.DataFrame(
+        {
+            "feature_a": [1.1, 2.1, 3.1],
+            "feature_b": ["x", "x", "z"],
+            "target": [0, 0, 1],
+        }
+    )
+
+    jsonl_path = tmp_path / "data.jsonl"
+    parquet_path = tmp_path / "reference.parquet"
+    data.to_json(jsonl_path, orient="records", lines=True)
+    reference.to_parquet(parquet_path, index=False)
+
+    auditor = DatasetAuditor()
+    report = auditor.audit_file(
+        str(jsonl_path),
+        reference_path=str(parquet_path),
+        label_column="target",
+        expected_columns=["feature_a", "feature_b", "target"],
+    )
+
+    assert report.rows == 3
+    assert report.columns == 3
+    assert "feature_a" in report.drift_scores
+
+
+def test_load_dataframe_rejects_unknown_suffix(tmp_path) -> None:
+    dataset_path = tmp_path / "data.tsv"
+    dataset_path.write_text("a\tb\n1\t2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported dataset format"):
+        DatasetAuditor.load_dataframe(dataset_path)
 
 
 def test_demo_notebook_is_valid_json() -> None:

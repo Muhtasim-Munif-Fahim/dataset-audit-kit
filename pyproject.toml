@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataset-audit-kit"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight dataset validation toolkit for schema, missingness, and drift checks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,8 @@ authors = [
 ]
 keywords = ["data quality", "validation", "ml", "dataset", "drift"]
 dependencies = [
-  "pandas>=2.2.0"
+  "pandas>=2.2.0",
+  "pyarrow>=17.0.0"
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
@@ -265,13 +266,47 @@ class DatasetAuditor:
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
     ) -> AuditReport:
-        data = pd.read_csv(data_path)
-        reference = pd.read_csv(reference_path) if reference_path else None
+        return self.audit_file(
+            data_path,
+            reference_path=reference_path,
+            label_column=label_column,
+            expected_columns=expected_columns,
+        )
+
+    def audit_file(
+        self,
+        data_path: str,
+        *,
+        reference_path: str | None = None,
+        label_column: str | None = None,
+        expected_columns: Sequence[str] | None = None,
+    ) -> AuditReport:
+        data = self.load_dataframe(data_path)
+        reference = self.load_dataframe(reference_path) if reference_path else None
         return self.audit_dataframe(
             data,
             reference=reference,
             label_column=label_column,
             expected_columns=expected_columns,
+        )
+
+    @staticmethod
+    def load_dataframe(path: str | Path) -> pd.DataFrame:
+        """Load a tabular dataset from CSV, JSONL/NDJSON, or Parquet."""
+
+        dataset_path = Path(path)
+        suffix = dataset_path.suffix.lower()
+
+        if suffix == ".csv":
+            return pd.read_csv(dataset_path)
+        if suffix in {".jsonl", ".ndjson"}:
+            return pd.read_json(dataset_path, lines=True)
+        if suffix == ".parquet":
+            return pd.read_parquet(dataset_path)
+
+        raise ValueError(
+            f"Unsupported dataset format for `{dataset_path}`. "
+            "Supported formats are .csv, .jsonl, .ndjson, and .parquet."
         )
 
     def _missingness(self, data: pd.DataFrame, issues: list[AuditIssue]) -> dict[str, float]:

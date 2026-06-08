@@ -73,6 +73,31 @@ def test_cli_writes_html_report(tmp_path, capsys) -> None:
     assert "HTML report written to" in captured.out
 
 
+def test_cli_accepts_parquet_input(tmp_path, capsys) -> None:
+    data = pd.DataFrame(
+        {
+            "feature_a": [1.0, 2.0, 3.0],
+            "target": [0, 0, 1],
+        }
+    )
+    data_path = tmp_path / "data.parquet"
+    data.to_parquet(data_path, index=False)
+
+    exit_code = main(
+        [
+            "audit",
+            str(data_path),
+            "--label-column",
+            "target",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert '"rows": 3' in captured.out
+
+
 def test_demo_script_runs() -> None:
     import runpy
 

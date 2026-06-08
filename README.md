@@ -27,6 +27,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Duplicate-row detection.
 - Label balance and label completeness checks.
 - Numeric and categorical drift checks against a reference dataset.
+- CSV, JSONL/NDJSON, and Parquet dataset loading.
 - JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
 
@@ -45,13 +46,10 @@ pip install -r requirements.txt
 import pandas as pd
 from dataset_audit_kit import DatasetAuditor
 
-data = pd.read_csv("train.csv")
-reference = pd.read_csv("reference.csv")
-
 auditor = DatasetAuditor(missing_threshold=0.05, drift_threshold=0.20)
-report = auditor.audit_dataframe(
-    data,
-    reference=reference,
+report = auditor.audit_file(
+    "train.parquet",
+    reference_path="reference.jsonl",
     label_column="target",
     expected_columns=["feature_1", "feature_2", "target"],
 )
@@ -62,8 +60,8 @@ print(report.to_markdown())
 ## CLI
 
 ```bash
-dataset-audit-kit audit data.csv \
-  --reference reference.csv \
+dataset-audit-kit audit data.parquet \
+  --reference reference.jsonl \
   --label-column target \
   --expected-columns feature_1,feature_2,target
 ```
@@ -71,6 +69,8 @@ dataset-audit-kit audit data.csv \
 Use `--json` if you want machine-readable output for automation.
 
 Use `--html-out report.html` to export a shareable standalone HTML report.
+
+Supported formats are `.csv`, `.jsonl`, `.ndjson`, and `.parquet`.
 
 ## Demo
 

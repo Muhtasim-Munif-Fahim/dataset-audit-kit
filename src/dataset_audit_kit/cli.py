@@ -13,9 +13,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dataset-audit-kit")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    audit = subparsers.add_parser("audit", help="Audit a CSV dataset")
-    audit.add_argument("data", help="Path to the dataset CSV")
-    audit.add_argument("--reference", help="Path to the reference CSV", default=None)
+    audit = subparsers.add_parser("audit", help="Audit a dataset file")
+    audit.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+    audit.add_argument(
+        "--reference",
+        help="Path to the reference dataset (.csv, .jsonl, .ndjson, .parquet)",
+        default=None,
+    )
     audit.add_argument("--label-column", help="Name of the label column", default=None)
     audit.add_argument(
         "--expected-columns",
@@ -65,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
     )
-    report = auditor.audit_csv(
+    report = auditor.audit_file(
         args.data,
         reference_path=args.reference,
         label_column=args.label_column,
