@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from dataset_audit_kit.cli import main
+
+
+def test_cli_outputs_json(tmp_path, capsys) -> None:
+    data = pd.DataFrame(
+        {
+            "feature_a": [1.0, 2.0, 3.0],
+            "target": [0, 0, 1],
+        }
+    )
+    reference = pd.DataFrame(
+        {
+            "feature_a": [1.0, 1.1, 1.2],
+            "target": [0, 1, 1],
+        }
+    )
+
+    data_path = tmp_path / "data.csv"
+    reference_path = tmp_path / "reference.csv"
+    data.to_csv(data_path, index=False)
+    reference.to_csv(reference_path, index=False)
+
+    exit_code = main(
+        [
+            "audit",
+            str(data_path),
+            "--reference",
+            str(reference_path),
+            "--label-column",
+            "target",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert '"status": "pass"' in captured.out or '"status": "warn"' in captured.out
+
+
+def test_demo_script_runs() -> None:
+    import runpy
+
+    runpy.run_path(str(Path("examples/demo.py")), run_name="__main__")
+

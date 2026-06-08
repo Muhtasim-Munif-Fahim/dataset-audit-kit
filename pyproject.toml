@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dataset-audit-kit"
+version = "0.1.0"
+description = "A lightweight dataset validation toolkit for schema, missingness, and drift checks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Muhtasim Munif Fahim" }
+]
+keywords = ["data quality", "validation", "ml", "dataset", "drift"]
+dependencies = [
+  "pandas>=2.2.0"
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "scikit-learn>=1.5.0",
+  "nbformat>=5.10.0",
+]
+
+[project.scripts]
+dataset-audit-kit = "dataset_audit_kit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit"
+Repository = "https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit"
+Issues = "https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+

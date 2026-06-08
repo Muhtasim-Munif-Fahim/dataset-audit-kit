@@ -1,0 +1,110 @@
+# Dataset Audit Kit
+
+[![Tests](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/actions/workflows/tests.yml/badge.svg)](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/actions)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+`dataset-audit-kit` is a small Python library and CLI for dataset validation. It checks schema drift, missing values, duplicates, label consistency, and basic distribution shifts before a dataset reaches training or production.
+
+The goal is to make data quality checks boring, repeatable, and easy to run in a maintainer-friendly OSS workflow.
+
+## Problem
+
+Many ML failures start with the data, not the model:
+
+- a column disappears after a source change
+- missing values silently spike
+- duplicate rows leak into training
+- labels become imbalanced
+- a new dataset shifts far away from the reference baseline
+
+This toolkit gives you a lightweight audit layer before you launch a training job or publish a dataset update.
+
+## Features
+
+- Schema checks against expected columns.
+- Missingness summary by column.
+- Duplicate-row detection.
+- Label balance and label completeness checks.
+- Numeric and categorical drift checks against a reference dataset.
+- JSON and Markdown report output.
+- CLI and notebook demo paths for documentation and review.
+
+## Installation
+
+```bash
+pip install dataset-audit-kit
+
+# Development install
+pip install -r requirements.txt
+```
+
+## Quickstart
+
+```python
+import pandas as pd
+from dataset_audit_kit import DatasetAuditor
+
+data = pd.read_csv("train.csv")
+reference = pd.read_csv("reference.csv")
+
+auditor = DatasetAuditor(missing_threshold=0.05, drift_threshold=0.20)
+report = auditor.audit_dataframe(
+    data,
+    reference=reference,
+    label_column="target",
+    expected_columns=["feature_1", "feature_2", "target"],
+)
+
+print(report.to_markdown())
+```
+
+## CLI
+
+```bash
+dataset-audit-kit audit data.csv \
+  --reference reference.csv \
+  --label-column target \
+  --expected-columns feature_1,feature_2,target
+```
+
+Use `--json` if you want machine-readable output for automation.
+
+## Demo
+
+The repository includes a fully self-contained demo based on the public Iris dataset.
+
+- Script: [`examples/demo.py`](examples/demo.py)
+- Notebook: [`examples/demo.ipynb`](examples/demo.ipynb)
+
+![Dataset audit demo](assets/demo-screenshot.svg)
+
+## What It Reports
+
+- Total rows and columns.
+- Missing values per column.
+- Duplicate rows.
+- Label distribution.
+- Drift score summaries for reference comparisons.
+- A short issue list with severity, column, and explanation.
+
+## Roadmap
+
+- Add Parquet and JSONL loaders.
+- Add configurable per-column validation rules.
+- Add a richer HTML report.
+- Add a pre-commit hook or GitHub Action that blocks invalid uploads.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and pull request guidance.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
