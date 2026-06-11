@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from dataset_audit_kit import DatasetAuditor
+from dataset_audit_kit import DatasetAuditor, ValidationRules
 
 
 def test_audit_detects_quality_issues() -> None:
@@ -120,3 +120,104 @@ def test_demo_notebook_is_valid_json() -> None:
     notebook = json.loads(Path("examples/demo.ipynb").read_text(encoding="utf-8"))
     assert notebook["nbformat"] == 4
     assert len(notebook["cells"]) >= 2
+
+# ------------------------------------------------------------------
+# Per-column validation rules
+# ------------------------------------------------------------------
+
+class TestColumnRules:
+    """Tests for per-column validation rules (issue #3)."""
+
+    def test_clean_data_passes_rules(self):
+        data = pd.DataFrame({
+            "feature_1": [1.0, 2.0, 1.5],
+            "feature_2": [2.5, 3.5, 2.0],
+            "target": ["A", "B", "A"],
+        })
+        rules = ValidationRules.from_dict({
+            "feature_1": {"dtype": "numeric", "min_value": 0.0, "max_value": 10.0},
+            "feature_2": {"dtype": "numeric", "min_value": 0.0, "max_value": 10.0},
+            "target": {"dtype": "categorical", "allowed_values": ["A", "B"]},
+        })
+        auditor = DatasetAuditor(rules=rules)
+        report = auditor.audit_dataframe(data)
+        rule_issues = [i for i in report.issues if i.check == "rule"]
+        assert len(rule_issues) == 0, f"Expected no rule issues, got: {rule_issues}"
+
+    def test_outlier_detected_by_rule(self):
+        data = pd.DataFrame({
+            "feature_1": [1.0, 100.0, 2.0],
+            "feature_2": [2.5, 3.5, 2.0],
+        })
+        rules = ValidationRules.from_dict({
+            "feature_1": {"dtype": "numeric", "min_value": 0.0, "max_value": 10.0},
+        })
+        auditor = DatasetAuditor(rules=rules)
+        report = auditor.audit_dataframe(data)
+        rule_issues = [i for i in report.issues if i.check == "rule"]
+        assert len(rule_issues) == 1
+        assert "above maximum" in rule_issues[0].message
+
+    def test_unexpected_categorical_values(self):
+        data = pd.DataFrame({
+            "target": ["A", "B", "X", "Y"],
+        })
+        rules = ValidationRules.from_dict({
+            "target": {"allowed_values": ["A", "B"]},
+        })
+        auditor = DatasetAuditor(rules=rules)
+        report = auditor.audit_dataframe(data)
+        rule_issues = [i for i in report.issues if i.check == "rule"]
+        assert len(rule_issues) == 1
+        assert "Unexpected values" in rule_issues[0].message
+
+    def test_missing_column_defined_in_rule(self):
+        data = pd.DataFrame({
+            "feature_1": [1.0, 2.0],
+        })
+        rules = ValidationRules.from_dict({
+            "feature_1": {"dtype": "numeric"},
+            "missing_col": {"dtype": "numeric"},
+        })
+        auditor = DatasetAuditor(rules=rules)
+        report = auditor.audit_dataframe(data)
+        rule_issues = [i for i in report.issues if i.check == "rule"]
+        assert len(rule_issues) == 1
+        assert "missing column" in rule_issues[0].message.lower()
+
+    def test_validation_rules_from_json(self, tmp_path):
+        import json
+        rules_file = tmp_path / "rules.json"
+        rules_file.write_text(json.dumps({
+            "score": {"dtype": "numeric", "min_value": 0.0, "max_value": 100.0},
+        }))
+        rules = ValidationRules.from_json(str(rules_file))
+        assert "score" in rules.columns
+        assert rules.columns["score"].min_value == 0.0
+        assert rules.columns["score"].max_value == 100.0
+
+    def test_validation_rules_to_dict_roundtrip(self):
+        rules = ValidationRules.from_dict({
+            "col": {"dtype": "numeric", "min_value": 0.0, "allowed_values": None},
+        })
+        d = rules.to_dict()
+        assert "col" in d
+        assert d["col"]["dtype"] == "numeric"
+        assert d["col"]["min_value"] == 0.0
+        # Fields with None should be omitted
+        assert "allowed_values" not in d["col"]
+
+    def test_per_column_missing_threshold(self):
+        data = pd.DataFrame({
+            "feature_1": [1.0, None, None],
+            "feature_2": [2.5, 3.5, None],
+        })
+        rules = ValidationRules.from_dict({
+            "feature_1": {"max_missing_ratio": 0.2},  # 66% missing > 20%
+            "feature_2": {"max_missing_ratio": 0.5},  # 33% missing < 50%
+        })
+        auditor = DatasetAuditor(rules=rules, missing_threshold=1.0)  # global threshold lenient
+        report = auditor.audit_dataframe(data)
+        rule_issues = [i for i in report.issues if i.check == "rule"]
+        assert len(rule_issues) == 1
+        assert "feature_1" in rule_issues[0].column

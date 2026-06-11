@@ -1,0 +1,18 @@
+{
+  "feature_1": {
+    "dtype": "numeric",
+    "min_value": 0.0,
+    "max_value": 10.0,
+    "max_missing_ratio": 0.1
+  },
+  "feature_2": {
+    "dtype": "numeric",
+    "min_value": 0.0,
+    "max_value": 10.0,
+    "max_missing_ratio": 0.1
+  },
+  "target": {
+    "dtype": "categorical",
+    "allowed_values": ["A", "B"]
+  }
+}

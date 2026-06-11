@@ -23,6 +23,84 @@ class AuditIssue:
     threshold: float | int | None = None
 
 
+@dataclass(frozen=True)
+class ColumnRule:
+    """Per-column validation rule.
+
+    Attributes
+    ----------
+    name : str
+        Column name to which this rule applies.
+    dtype : str | None
+        Expected data type: ``"numeric"``, ``"categorical"``, or ``"string"``.
+        If set, the auditor checks whether the column's inferred type matches.
+    min_value : float | None
+        Minimum allowed value (numeric columns only).
+    max_value : float | None
+        Maximum allowed value (numeric columns only).
+    allowed_values : list[str] | None
+        Set of allowed values (categorical/string columns only).
+    max_missing_ratio : float | None
+        Maximum allowed fraction of missing values for this column.
+        Overrides the global ``missing_threshold`` when set.
+    """
+
+    name: str
+    dtype: str | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    allowed_values: list[str] | None = None
+    max_missing_ratio: float | None = None
+
+
+@dataclass(frozen=True)
+class ValidationRules:
+    """A collection of per-column validation rules.
+
+    Parameters
+    ----------
+    columns : dict[str, ColumnRule]
+        Mapping from column name to its validation rule.
+    """
+
+    columns: dict[str, ColumnRule] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, rules: dict[str, dict[str, object]]) -> "ValidationRules":
+        """Build rules from a plain dictionary (e.g. loaded from JSON)."""
+        column_rules: dict[str, ColumnRule] = {}
+        for col_name, col_config in rules.items():
+            column_rules[col_name] = ColumnRule(
+                name=col_name,
+                dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
+                min_value=col_config.get("min_value"),
+                max_value=col_config.get("max_value"),
+                allowed_values=col_config.get("allowed_values"),
+                max_missing_ratio=col_config.get("max_missing_ratio"),
+            )
+        return cls(columns=column_rules)
+
+    @classmethod
+    def from_json(cls, path: str) -> "ValidationRules":
+        """Load rules from a JSON file."""
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            raw: dict[str, dict[str, object]] = json.load(f)
+        return cls.from_dict(raw)
+
+    def to_dict(self) -> dict[str, dict[str, object]]:
+        """Serialize to a plain dictionary for JSON export."""
+        result: dict[str, dict[str, object]] = {}
+        for name, rule in self.columns.items():
+            entry: dict[str, object] = {}
+            for attr in ("dtype", "min_value", "max_value", "allowed_values", "max_missing_ratio"):
+                value = getattr(rule, attr)
+                if value is not None:
+                    entry[attr] = value
+            result[name] = entry
+        return result
+
+
 @dataclass
 class AuditReport:
     """Structured output from a dataset audit."""
@@ -207,10 +285,12 @@ class DatasetAuditor:
         missing_threshold: float = 0.05,
         drift_threshold: float = 0.20,
         label_min_share: float = 0.05,
+        rules: ValidationRules | None = None,
     ) -> None:
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
         self.label_min_share = label_min_share
+        self.rules = rules
 
     def audit_dataframe(
         self,
@@ -246,6 +326,9 @@ class DatasetAuditor:
         drift_scores: dict[str, float] = {}
         if reference is not None:
             drift_scores = self._check_drift(data, reference, issues, label_column=label_column)
+
+        # Per-column validation rules
+        self._apply_rules(data, issues)
 
         return AuditReport(
             rows=int(len(data)),
@@ -416,6 +499,117 @@ class DatasetAuditor:
                 )
 
         return {str(label): int(count) for label, count in counts.items()}
+
+    def _apply_rules(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Evaluate per-column validation rules against the dataset."""
+        if self.rules is None:
+            return
+
+        for column_name, rule in self.rules.columns.items():
+            if column_name not in data.columns:
+                issues.append(
+                    AuditIssue(
+                        check="rule",
+                        severity="error",
+                        message=f"Rule defined for missing column '{column_name}'.",
+                        column=column_name,
+                    )
+                )
+                continue
+
+            col_data = data[column_name]
+
+            # --- dtype check ---
+            if rule.dtype is not None:
+                inferred = self._infer_dtype(col_data)
+                if inferred != rule.dtype:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="error",
+                            message=f"Expected dtype '{rule.dtype}', inferred '{inferred}'.",
+                            column=column_name,
+                        )
+                    )
+
+            # --- missingness check (per-column override) ---
+            if rule.max_missing_ratio is not None:
+                missing_ratio = float(col_data.isna().mean())
+                if missing_ratio > rule.max_missing_ratio:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=f"Missing ratio {missing_ratio:.1%} exceeds allowed {rule.max_missing_ratio:.1%}.",
+                            column=column_name,
+                            observed=missing_ratio,
+                            threshold=rule.max_missing_ratio,
+                        )
+                    )
+
+            # --- numeric bounds ---
+            if rule.min_value is not None or rule.max_value is not None:
+                numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
+                if rule.min_value is not None:
+                    violations = (numeric < rule.min_value).sum()
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=f"{int(violations)} value(s) below minimum {rule.min_value}.",
+                                column=column_name,
+                                observed=float(violations),
+                                threshold=rule.min_value,
+                            )
+                        )
+                if rule.max_value is not None:
+                    violations = (numeric > rule.max_value).sum()
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=f"{int(violations)} value(s) above maximum {rule.max_value}.",
+                                column=column_name,
+                                observed=float(violations),
+                                threshold=rule.max_value,
+                            )
+                        )
+
+            # --- allowed values ---
+            if rule.allowed_values is not None:
+                allowed_set = set(str(v) for v in rule.allowed_values)
+                actual_values = col_data.dropna().astype(str).unique()
+                unexpected = [str(v) for v in actual_values if str(v) not in allowed_set]
+                if unexpected:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=f"Unexpected values found: {', '.join(sorted(unexpected)[:10])}.",
+                            column=column_name,
+                            observed=len(unexpected),
+                        )
+                    )
+
+    @staticmethod
+    def _infer_dtype(series: pd.Series) -> str:
+        """Infer a human-readable type for a series."""
+        if pd.api.types.is_numeric_dtype(series):
+            return "numeric"
+        if pd.api.types.is_categorical_dtype(series) or series.dtype == object:
+            # Check if mostly numeric
+            numeric_count = pd.to_numeric(series.dropna(), errors="coerce").notna().sum()
+            total_non_null = series.dropna().shape[0]
+            if total_non_null > 0 and numeric_count / total_non_null > 0.8:
+                return "numeric"
+            return "categorical"
+        return "string"
 
     def _check_drift(
         self,

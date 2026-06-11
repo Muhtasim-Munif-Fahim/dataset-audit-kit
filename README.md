@@ -27,6 +27,8 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Duplicate-row detection.
 - Label balance and label completeness checks.
 - Numeric and categorical drift checks against a reference dataset.
+- Configurable per-column validation rules with JSON-based rule files.
+- CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
 - JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
@@ -72,6 +74,64 @@ Use `--html-out report.html` to export a shareable standalone HTML report.
 
 Supported formats are `.csv`, `.jsonl`, `.ndjson`, and `.parquet`.
 
+### CI check
+
+```bash
+dataset-audit-kit check data.csv --rules rules.json
+```
+
+Exits with code `0` if all checks pass, `1` if any issues are found. Use it in CI:
+
+```yaml
+- name: Validate dataset
+  run: dataset-audit-kit check data.csv --rules rules.json
+```
+
+## Per-column Validation Rules
+
+Define stronger expectations than global thresholds with a JSON rule file:
+
+```json
+{
+  "age": {
+    "dtype": "numeric",
+    "min_value": 0,
+    "max_value": 120,
+    "max_missing_ratio": 0.05
+  },
+  "income": {
+    "dtype": "numeric",
+    "min_value": 0
+  },
+  "category": {
+    "dtype": "categorical",
+    "allowed_values": ["A", "B", "C"]
+  }
+}
+```
+
+Use it via the CLI:
+
+```bash
+dataset-audit-kit audit data.csv --rules rules.json
+```
+
+Or in Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor, ValidationRules
+
+rules = ValidationRules.from_json("rules.json")
+auditor = DatasetAuditor(rules=rules)
+report = auditor.audit_file("data.csv")
+```
+
+Rules are checked per-column for:
+- **Data type** — `numeric`, `categorical`, or `string`
+- **Numeric bounds** — `min_value` / `max_value`
+- **Allowed values** — `allowed_values` for categorical columns
+- **Missing ratio** — `max_missing_ratio` (overrides the global threshold per column)
+
 ## Demo
 
 The repository includes a fully self-contained demo based on the public Iris dataset.
@@ -92,10 +152,10 @@ The repository includes a fully self-contained demo based on the public Iris dat
 
 ## Roadmap
 
-- [Add HTML report export](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/1)
-- [Add Parquet and JSONL loaders](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/2)
-- [Add configurable per-column validation rules](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/3)
-- [Add CI check for auditable sample datasets](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/issues/4)
+- ~~Add HTML report export~~ ✅ v0.1.1
+- ~~Add Parquet and JSONL loaders~~ ✅ v0.1.2
+- ~~Add per-column validation rules~~ ✅ v0.2.0
+- ~~Add CI check for auditable sample datasets~~ ✅ v0.2.0
 
 ## Tests
 

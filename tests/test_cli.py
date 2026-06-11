@@ -10,7 +10,7 @@ from dataset_audit_kit.cli import main
 def test_cli_outputs_json(tmp_path, capsys) -> None:
     data = pd.DataFrame(
         {
-            "feature_a": [1.0, 2.0, 3.0],
+            "feature_a": [1.0, 1.1, 1.2],
             "target": [0, 0, 1],
         }
     )
@@ -46,7 +46,7 @@ def test_cli_outputs_json(tmp_path, capsys) -> None:
 def test_cli_writes_html_report(tmp_path, capsys) -> None:
     data = pd.DataFrame(
         {
-            "feature_a": [1.0, 2.0, 3.0],
+            "feature_a": [1.0, 1.1, 1.2],
             "target": [0, 0, 1],
         }
     )
@@ -76,7 +76,7 @@ def test_cli_writes_html_report(tmp_path, capsys) -> None:
 def test_cli_accepts_parquet_input(tmp_path, capsys) -> None:
     data = pd.DataFrame(
         {
-            "feature_a": [1.0, 2.0, 3.0],
+            "feature_a": [1.0, 1.1, 1.2],
             "target": [0, 0, 1],
         }
     )
