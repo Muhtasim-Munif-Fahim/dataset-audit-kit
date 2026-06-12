@@ -338,6 +338,255 @@ class AuditReport:
         return "\n".join(sections)
 
 
+    @property
+    def fix_suggestions(self) -> list[dict[str, str]]:
+        """Generate actionable fix suggestions for each issue in the report."""
+        suggestions: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for issue in self.issues:
+            key = f"{issue.check}:{issue.column or ''}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            suggestion: dict[str, str] = {
+                "issue": issue.message,
+                "severity": issue.severity,
+            }
+
+            if issue.check == "duplicates":
+                suggestion["action"] = "drop_duplicates"
+                suggestion["code"] = "df = df.drop_duplicates()"
+                suggestion["description"] = "Remove duplicate rows from the dataset."
+            elif issue.check == "missingness":
+                col = issue.column or ""
+                suggestion["action"] = "impute_median"
+                suggestion["code"] = f"df['{col}'] = df['{col}'].fillna(df['{col}'].median())"
+                suggestion["description"] = f"Impute missing values in '{col}' with the median."
+            elif issue.check == "schema" and "Missing expected columns" in issue.message:
+                suggestion["action"] = "add_columns"
+                suggestion["code"] = "df = df.reindex(columns=expected_columns)"
+                suggestion["description"] = "Add missing columns with NaN values."
+            elif issue.check == "schema" and "Unexpected columns" in issue.message:
+                suggestion["action"] = "drop_columns"
+                suggestion["code"] = "df = df[expected_columns]"
+                suggestion["description"] = "Drop columns not in the expected schema."
+            elif issue.check == "rule" and "above maximum" in issue.message:
+                suggestion["action"] = "clip_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(upper=max_value)"
+                suggestion["description"] = f"Clip values in '{col}' to the allowed maximum."
+            elif issue.check == "rule" and "below minimum" in issue.message:
+                suggestion["action"] = "clip_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(lower=min_value)"
+                suggestion["description"] = f"Clip values in '{col}' to the allowed minimum."
+            elif issue.check == "rule" and "Unexpected values" in issue.message:
+                suggestion["action"] = "replace_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].where(df['{col}'].isin(allowed_values), other=default)"
+                suggestion["description"] = f"Replace unexpected values in '{col}' with a default."
+            elif issue.check == "rule" and "missing column" in issue.message:
+                suggestion["action"] = "remove_rule"
+                col = issue.column or ""
+                suggestion["code"] = f"# Remove rule for '{col}' from rules config"
+                suggestion["description"] = f"Column '{col}' defined in rules but not in dataset."
+            elif issue.check == "labels" and "missing label" in issue.message:
+                suggestion["action"] = "drop_missing_labels"
+                col = issue.column or ""
+                suggestion["code"] = f"df = df.dropna(subset=['{col}'])"
+                suggestion["description"] = f"Drop rows with missing label values in '{col}'."
+            elif issue.check == "labels" and "imbalanced" in issue.message:
+                suggestion["action"] = "resample"
+                col = issue.column or ""
+                suggestion["code"] = "# Consider stratified sampling or class weighting"
+                suggestion["description"] = f"Address label imbalance in '{col}' via resampling or weighting."
+            elif issue.check == "drift":
+                suggestion["action"] = "investigate_drift"
+                suggestion["code"] = "# Review data pipeline for distribution shift source"
+                suggestion["description"] = "Investigate root cause of distribution drift."
+            elif issue.check == "correlation_drift":
+                suggestion["action"] = "investigate_correlation_shift"
+                suggestion["code"] = "# Compare feature generation logic between reference and current"
+                suggestion["description"] = "Investigate pairwise correlation structure change."
+            elif issue.check == "uniqueness":
+                col = issue.column or ""
+                suggestion["action"] = "deduplicate_column"
+                suggestion["code"] = f"df = df.drop_duplicates(subset=['{col}'])"
+                suggestion["description"] = f"Remove rows with duplicate values in '{col}'."
+            else:
+                suggestion["action"] = "manual_review"
+                suggestion["code"] = "# No automated fix available"
+                suggestion["description"] = "Manual review required."
+
+            suggestions.append(suggestion)
+
+        return suggestions
+
+    def to_file(self, path: str) -> str:
+        """Write the report to a file, auto-detecting format from extension.
+
+        Supported extensions:
+        - ``.json`` — JSON format
+        - ``.md`` — Markdown format
+        - ``.html`` — HTML format
+
+        Parameters
+        ----------
+        path : str
+            Output file path.
+
+        Returns
+        -------
+        str
+            The path that was written to.
+        """
+        path_obj = Path(path)
+        suffix = path_obj.suffix.lower()
+
+        if suffix == ".json":
+            content = self.to_json()
+        elif suffix == ".md":
+            content = self.to_markdown()
+        elif suffix == ".html":
+            content = self.to_html()
+        else:
+            raise ValueError(
+                f"Unsupported report format '{suffix}'. "
+                "Supported formats are .json, .md, .html."
+            )
+
+        path_obj.write_text(content, encoding="utf-8")
+        return path
+
+
+
+
+    @property
+    def fix_suggestions(self) -> list[dict[str, str]]:
+        """Generate actionable fix suggestions for each issue in the report."""
+        suggestions: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for issue in self.issues:
+            key = f"{issue.check}:{issue.column or ''}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            suggestion: dict[str, str] = {
+                "issue": issue.message,
+                "severity": issue.severity,
+            }
+
+            if issue.check == "duplicates":
+                suggestion["action"] = "drop_duplicates"
+                suggestion["code"] = "df = df.drop_duplicates()"
+                suggestion["description"] = "Remove duplicate rows from the dataset."
+            elif issue.check == "missingness":
+                col = issue.column or ""
+                suggestion["action"] = "impute_median"
+                suggestion["code"] = f"df['{col}'] = df['{col}'].fillna(df['{col}'].median())"
+                suggestion["description"] = f"Impute missing values in '{col}' with the median."
+            elif issue.check == "schema" and "Missing expected columns" in issue.message:
+                suggestion["action"] = "add_columns"
+                suggestion["code"] = "df = df.reindex(columns=expected_columns)"
+                suggestion["description"] = "Add missing columns with NaN values."
+            elif issue.check == "schema" and "Unexpected columns" in issue.message:
+                suggestion["action"] = "drop_columns"
+                suggestion["code"] = "df = df[expected_columns]"
+                suggestion["description"] = "Drop columns not in the expected schema."
+            elif issue.check == "rule" and "above maximum" in issue.message:
+                suggestion["action"] = "clip_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(upper=max_value)"
+                suggestion["description"] = f"Clip values in '{col}' to the allowed maximum."
+            elif issue.check == "rule" and "below minimum" in issue.message:
+                suggestion["action"] = "clip_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(lower=min_value)"
+                suggestion["description"] = f"Clip values in '{col}' to the allowed minimum."
+            elif issue.check == "rule" and "Unexpected values" in issue.message:
+                suggestion["action"] = "replace_values"
+                col = issue.column or ""
+                suggestion["code"] = f"df['{col}'] = df['{col}'].where(df['{col}'].isin(allowed_values), other=default)"
+                suggestion["description"] = f"Replace unexpected values in '{col}' with a default."
+            elif issue.check == "rule" and "missing column" in issue.message:
+                suggestion["action"] = "remove_rule"
+                col = issue.column or ""
+                suggestion["code"] = f"# Remove rule for '{col}' from rules config"
+                suggestion["description"] = f"Column '{col}' defined in rules but not in dataset."
+            elif issue.check == "labels" and "missing label" in issue.message:
+                suggestion["action"] = "drop_missing_labels"
+                col = issue.column or ""
+                suggestion["code"] = f"df = df.dropna(subset=['{col}'])"
+                suggestion["description"] = f"Drop rows with missing label values in '{col}'."
+            elif issue.check == "labels" and "imbalanced" in issue.message:
+                suggestion["action"] = "resample"
+                col = issue.column or ""
+                suggestion["code"] = "# Consider stratified sampling or class weighting"
+                suggestion["description"] = f"Address label imbalance in '{col}' via resampling or weighting."
+            elif issue.check == "drift":
+                suggestion["action"] = "investigate_drift"
+                suggestion["code"] = "# Review data pipeline for distribution shift source"
+                suggestion["description"] = "Investigate root cause of distribution drift."
+            elif issue.check == "correlation_drift":
+                suggestion["action"] = "investigate_correlation_shift"
+                suggestion["code"] = "# Compare feature generation logic between reference and current"
+                suggestion["description"] = "Investigate pairwise correlation structure change."
+            elif issue.check == "uniqueness":
+                col = issue.column or ""
+                suggestion["action"] = "deduplicate_column"
+                suggestion["code"] = f"df = df.drop_duplicates(subset=['{col}'])"
+                suggestion["description"] = f"Remove rows with duplicate values in '{col}'."
+            else:
+                suggestion["action"] = "manual_review"
+                suggestion["code"] = "# No automated fix available"
+                suggestion["description"] = "Manual review required."
+
+            suggestions.append(suggestion)
+
+        return suggestions
+
+    def to_file(self, path: str) -> str:
+        """Write the report to a file, auto-detecting format from extension.
+
+        Supported extensions:
+        - `.json` -- JSON format
+        - `.md` -- Markdown format
+        - `.html` -- HTML format
+
+        Parameters
+        ----------
+        path : str
+            Output file path.
+
+        Returns
+        -------
+        str
+            The path that was written to.
+        """
+        path_obj = Path(path)
+        suffix = path_obj.suffix.lower()
+
+        if suffix == ".json":
+            content = self.to_json()
+        elif suffix == ".md":
+            content = self.to_markdown()
+        elif suffix == ".html":
+            content = self.to_html()
+        else:
+            raise ValueError(
+                f"Unsupported report format '{suffix}'. "
+                "Supported formats are .json, .md, .html."
+            )
+
+        path_obj.write_text(content, encoding="utf-8")
+        return path
+
+
+
 class DatasetAuditor:
     """Run a small battery of quality checks over tabular data."""
 

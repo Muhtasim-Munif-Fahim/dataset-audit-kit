@@ -58,6 +58,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated list of columns that should contain unique values",
         default=None,
     )
+    audit.add_argument(
+        "--fix-suggestions",
+        action="store_true",
+        help="Print fix suggestions for each issue",
+    )
+    audit.add_argument(
+        "--save-json",
+        help="Write JSON report to the specified path",
+        default=None,
+    )
+    audit.add_argument(
+        "--save-markdown",
+        help="Write Markdown report to the specified path",
+        default=None,
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -73,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--save-json",
+        help="Write JSON report to the specified path",
+        default=None,
+    )
+    check.add_argument(
+        "--save-markdown",
+        help="Write Markdown report to the specified path",
+        default=None,
     )
     return parser
 
@@ -111,6 +136,28 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     if args.html_out:
         print(f"HTML report written to {args.html_out}")
 
+    if args.fix_suggestions:
+        suggestions = report.fix_suggestions
+        if suggestions:
+            print()
+            print("## Fix suggestions")
+            for s in suggestions:
+                print("- **" + s["action"] + "**: " + s["description"])
+                print("  ```python")
+                print("  " + s["code"])
+                print("  ```")
+        else:
+            print()
+            print("_No fix suggestions -- dataset is clean._")
+
+    if args.save_json:
+        saved = report.to_file(args.save_json)
+        print(f"JSON report saved to {saved}")
+
+    if args.save_markdown:
+        saved = report.to_file(args.save_markdown)
+        print(f"Markdown report saved to {saved}")
+
     return 0 if report.status == "pass" else 1
 
 
@@ -131,9 +178,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     if report.issues:
         print(report.to_markdown())
+        if args.save_json:
+            report.to_file(args.save_json)
+        if args.save_markdown:
+            report.to_file(args.save_markdown)
         print(f"\n[FAIL] Found {len(report.issues)} issue(s) - check failed.", flush=True)
         return 1
 
+    if args.save_json:
+        report.to_file(args.save_json)
+    if args.save_markdown:
+        report.to_file(args.save_markdown)
     print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
     return 0
 
