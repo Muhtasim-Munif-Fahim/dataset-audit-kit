@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write an HTML report to the given path",
         default=None,
     )
+    audit.add_argument(
+        "--unique-columns",
+        help="Comma-separated list of columns that should contain unique values",
+        default=None,
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -91,6 +96,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         reference_path=args.reference,
         label_column=args.label_column,
         expected_columns=_parse_columns(args.expected_columns),
+        unique_columns=_parse_columns(args.unique_columns),
     )
 
     if args.html_out:
@@ -120,6 +126,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         reference_path=None,
         label_column=None,
         expected_columns=None,
+        unique_columns=None,
     )
 
     if report.issues:

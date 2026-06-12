@@ -361,6 +361,7 @@ class DatasetAuditor:
         reference: pd.DataFrame | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        unique_columns: Sequence[str] | None = None,
     ) -> AuditReport:
         if not isinstance(data, pd.DataFrame):
             raise TypeError("data must be a pandas.DataFrame")
@@ -381,18 +382,27 @@ class DatasetAuditor:
         if expected_columns is not None:
             self._check_schema(data, expected_columns, issues)
 
+        if unique_columns is not None:
+            self._check_uniqueness(data, unique_columns, issues)
+
         label_distribution: dict[str, int] = {}
         if label_column is not None and label_column in data.columns:
             label_distribution = self._check_label_balance(data, label_column, issues)
 
         drift_scores: dict[str, float] = {}
+        correlation_drift_scores: dict[str, float] = {}
         if reference is not None:
             drift_scores = self._check_drift(data, reference, issues, label_column=label_column)
+            correlation_drift_scores = self._correlation_drift(
+                data, reference, issues, drift_threshold=self.drift_threshold
+            )
 
         # Per-column validation rules
         self._apply_rules(data, issues)
 
         column_profiles = self._profile_columns(data)
+
+        all_drift_scores = {**drift_scores, **correlation_drift_scores}
 
         return AuditReport(
             rows=int(len(data)),
@@ -402,7 +412,7 @@ class DatasetAuditor:
             missingness=missingness,
             column_profiles=column_profiles,
             label_distribution=label_distribution,
-            drift_scores=drift_scores,
+            drift_scores=all_drift_scores,
             issues=issues,
         )
 
@@ -428,6 +438,7 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        unique_columns: Sequence[str] | None = None,
     ) -> AuditReport:
         data = self.load_dataframe(data_path)
         reference = self.load_dataframe(reference_path) if reference_path else None
@@ -436,11 +447,12 @@ class DatasetAuditor:
             reference=reference,
             label_column=label_column,
             expected_columns=expected_columns,
+            unique_columns=unique_columns,
         )
 
     @staticmethod
     def load_dataframe(path: str | Path) -> pd.DataFrame:
-        """Load a tabular dataset from CSV, JSONL/NDJSON, or Parquet."""
+        """Load a tabular dataset from CSV, JSONL/NDJSON, Parquet, or Excel."""
 
         dataset_path = Path(path)
         suffix = dataset_path.suffix.lower()
@@ -451,10 +463,12 @@ class DatasetAuditor:
             return pd.read_json(dataset_path, lines=True)
         if suffix == ".parquet":
             return pd.read_parquet(dataset_path)
+        if suffix in {".xlsx", ".xls"}:
+            return pd.read_excel(dataset_path, engine="openpyxl" if suffix == ".xlsx" else "xlrd")
 
         raise ValueError(
             f"Unsupported dataset format for `{dataset_path}`. "
-            "Supported formats are .csv, .jsonl, .ndjson, and .parquet."
+            "Supported formats are .csv, .jsonl, .ndjson, .parquet, and .xlsx/.xls."
         )
 
     def _missingness(self, data: pd.DataFrame, issues: list[AuditIssue]) -> dict[str, float]:
@@ -508,6 +522,37 @@ class DatasetAuditor:
                     message=f"Unexpected columns present: {', '.join(extra)}.",
                 )
             )
+
+    @staticmethod
+    def _check_uniqueness(
+        data: pd.DataFrame,
+        unique_columns: Sequence[str],
+        issues: list[AuditIssue],
+    ) -> None:
+        """Check that specified columns contain only unique values."""
+        for col in unique_columns:
+            if col not in data.columns:
+                issues.append(
+                    AuditIssue(
+                        check="uniqueness",
+                        severity="error",
+                        message=f"Unique column '{col}' not found in dataset.",
+                        column=col,
+                    )
+                )
+                continue
+            total = len(data[col])
+            duplicates = int(data[col].duplicated(keep=False).sum()) // 2
+            if duplicates > 0:
+                issues.append(
+                    AuditIssue(
+                        check="uniqueness",
+                        severity="warning",
+                        message=f"{duplicates} duplicate value(s) in unique column '{col}'.",
+                        column=col,
+                        observed=duplicates,
+                    )
+                )
 
     def _check_label_balance(
         self,
@@ -720,6 +765,53 @@ class DatasetAuditor:
         baseline_mean = float(baseline.mean())
         baseline_std = float(baseline.std(ddof=0)) or 1.0
         return abs(current_mean - baseline_mean) / max(abs(baseline_mean), baseline_std, 1e-9)
+
+    @staticmethod
+    def _correlation_drift(
+        data: pd.DataFrame,
+        reference: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        drift_threshold: float = 0.20,
+    ) -> dict[str, float]:
+        """Compare pairwise Pearson correlations between shared numeric columns."""
+        drift_scores: dict[str, float] = {}
+        numeric_cols = [
+            col for col in data.columns
+            if col in reference.columns
+            and pd.api.types.is_numeric_dtype(data[col])
+            and pd.api.types.is_numeric_dtype(reference[col])
+        ]
+        if len(numeric_cols) < 2:
+            return drift_scores
+
+        data_corr = data[numeric_cols].corr()
+        ref_corr = reference[numeric_cols].corr()
+
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1, len(numeric_cols)):
+                col_i = numeric_cols[i]
+                col_j = numeric_cols[j]
+                pair_name = f"{col_i}~{col_j}"
+                data_val = float(data_corr.loc[col_i, col_j]) if col_i in data_corr.index and col_j in data_corr.columns else 0.0
+                ref_val = float(ref_corr.loc[col_i, col_j]) if col_i in ref_corr.index and col_j in ref_corr.columns else 0.0
+                drift = abs(data_val - ref_val)
+                drift_scores[pair_name] = drift
+                if drift >= drift_threshold:
+                    issues.append(
+                        AuditIssue(
+                            check="correlation_drift",
+                            severity="warning",
+                            message=(
+                                f"Correlation between '{col_i}' and '{col_j}' "
+                                f"shifted from {ref_val:.3f} to {data_val:.3f} "
+                                f"(drift={drift:.3f})."
+                            ),
+                            observed=drift,
+                            threshold=drift_threshold,
+                        )
+                    )
+        return drift_scores
 
     @staticmethod
     def _profile_columns(data: pd.DataFrame) -> dict[str, dict[str, object]]:
