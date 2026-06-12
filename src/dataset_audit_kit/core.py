@@ -112,15 +112,27 @@ class AuditReport:
     missingness: dict[str, float] = field(default_factory=dict)
     label_distribution: dict[str, int] = field(default_factory=dict)
     drift_scores: dict[str, float] = field(default_factory=dict)
+    column_profiles: dict[str, dict[str, object]] = field(default_factory=dict)
     issues: list[AuditIssue] = field(default_factory=list)
 
     @property
     def status(self) -> str:
         return "pass" if not self.issues else "warn"
 
+    @property
+    def quality_score(self) -> int:
+        score = 100
+        for issue in self.issues:
+            if issue.severity == "error":
+                score -= 15
+            elif issue.severity == "warning":
+                score -= 5
+        return max(0, score)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "status": self.status,
+            "quality_score": self.quality_score,
             "rows": self.rows,
             "columns": self.columns,
             "duplicate_rows": self.duplicate_rows,
@@ -128,6 +140,7 @@ class AuditReport:
             "missingness": self.missingness,
             "label_distribution": self.label_distribution,
             "drift_scores": self.drift_scores,
+            "column_profiles": self.column_profiles,
             "issues": [issue.__dict__ for issue in self.issues],
         }
 
@@ -139,11 +152,29 @@ class AuditReport:
             "# Dataset Audit Report",
             "",
             f"- Status: **{self.status}**",
+            f"- Quality score: **{self.quality_score}/100**",
             f"- Rows: **{self.rows}**",
             f"- Columns: **{self.columns}**",
             f"- Duplicate rows: **{self.duplicate_rows}**",
             f"- Missing cells: **{self.missing_cells}**",
         ]
+
+        if self.column_profiles:
+            lines.extend(["", "## Column profiles"])
+            for col, profile in self.column_profiles.items():
+                dtype = profile.get("dtype", "?")
+                count = profile.get("count", "?")
+                missing_pct = f"{float(profile.get('missing', 0)) / max(int(count), 1) * 100:.1f}%" if count else "?"
+                lines.append(f"\n### {col} ({dtype})")
+                lines.append(f"- Count: {count}, Missing: {profile.get('missing', 0)} ({missing_pct}), Unique: {profile.get('unique', '?')}")
+                if dtype == "numeric":
+                    lines.append(f"- Range: {profile.get('min', '?')} - {profile.get('max', '?')}")
+                    lines.append(f"- Mean: {profile.get('mean', '?'):.3f}, Std: {profile.get('std', '?'):.3f}")
+                    lines.append(f"- Quartiles: Q1={profile.get('q25', '?')} Q2={profile.get('q50', '?')} Q3={profile.get('q75', '?')}")
+                elif dtype == "categorical":
+                    top_val = profile.get("top", "?")
+                    top_freq = profile.get("freq", "?")
+                    lines.append(f"- Top value: {top_val} ({top_freq})")
 
         if self.label_distribution:
             lines.extend(["", "## Label distribution"])
@@ -237,6 +268,7 @@ class AuditReport:
             f'<div class="metric"><span>Columns</span><strong>{self.columns}</strong></div>',
             f'<div class="metric"><span>Duplicate rows</span><strong>{self.duplicate_rows}</strong></div>',
             f'<div class="metric"><span>Missing cells</span><strong>{self.missing_cells}</strong></div>',
+            f'<div class="metric"><span>Quality score</span><strong>{self.quality_score}/100</strong></div>',
             "</div>",
         ]
 
@@ -255,6 +287,36 @@ class AuditReport:
                 *missingness_rows,
                 "</tbody></table>",
             ])
+
+        if self.column_profiles:
+            profile_sections = ["<h2>Column profiles</h2>"]
+            for col, profile in self.column_profiles.items():
+                dtype = profile.get("dtype", "?")
+                profile_sections.append(
+                    f"<details><summary>{esc(col)} ({dtype})</summary>"
+                    f"<table>"
+                    f"<tr><td>Count</td><td>{profile.get('count', '?')}</td></tr>"
+                    f"<tr><td>Missing</td><td>{profile.get('missing', 0)}</td></tr>"
+                    f"<tr><td>Unique</td><td>{profile.get('unique', '?')}</td></tr>"
+                )
+                if dtype == "numeric":
+                    profile_sections.extend([
+                        f"<tr><td>Min</td><td>{profile.get('min', '?')}</td></tr>",
+                        f"<tr><td>Max</td><td>{profile.get('max', '?')}</td></tr>",
+                        f"<tr><td>Mean</td><td>{profile.get('mean', '?'):.3f}</td></tr>",
+                        f"<tr><td>Std</td><td>{profile.get('std', '?'):.3f}</td></tr>",
+                        f"<tr><td>Q1</td><td>{profile.get('q25', '?')}</td></tr>",
+                        f"<tr><td>Q2 (median)</td><td>{profile.get('q50', '?')}</td></tr>",
+                        f"<tr><td>Q3</td><td>{profile.get('q75', '?')}</td></tr>",
+                    ])
+                elif dtype == "categorical":
+                    top_val = profile.get("top", "?")
+                    top_freq = profile.get("freq", "?")
+                    profile_sections.extend([
+                        f"<tr><td>Top value</td><td>{esc(str(top_val))} ({top_freq})</td></tr>",
+                    ])
+                profile_sections.append("</table></details>")
+            sections.extend(profile_sections)
 
         if drift_rows:
             sections.extend([
@@ -330,12 +392,15 @@ class DatasetAuditor:
         # Per-column validation rules
         self._apply_rules(data, issues)
 
+        column_profiles = self._profile_columns(data)
+
         return AuditReport(
             rows=int(len(data)),
             columns=int(len(data.columns)),
             duplicate_rows=duplicate_rows,
             missing_cells=int(data.isna().sum().sum()),
             missingness=missingness,
+            column_profiles=column_profiles,
             label_distribution=label_distribution,
             drift_scores=drift_scores,
             issues=issues,
@@ -655,6 +720,42 @@ class DatasetAuditor:
         baseline_mean = float(baseline.mean())
         baseline_std = float(baseline.std(ddof=0)) or 1.0
         return abs(current_mean - baseline_mean) / max(abs(baseline_mean), baseline_std, 1e-9)
+
+    @staticmethod
+    def _profile_columns(data: pd.DataFrame) -> dict[str, dict[str, object]]:
+        profiles: dict[str, dict[str, object]] = {}
+
+        for column in data.columns:
+            col = data[column]
+            non_null = col.dropna()
+            profile: dict[str, object] = {
+                "count": int(len(col)),
+                "missing": int(col.isna().sum()),
+                "unique": int(non_null.nunique()) if len(non_null) > 0 else 0,
+            }
+
+            if pd.api.types.is_numeric_dtype(col):
+                profile["dtype"] = "numeric"
+                if len(non_null) > 0:
+                    profile["min"] = float(non_null.min())
+                    profile["max"] = float(non_null.max())
+                    profile["mean"] = float(non_null.mean())
+                    profile["std"] = float(non_null.std(ddof=0))
+                    profile["q25"] = float(non_null.quantile(0.25))
+                    profile["q50"] = float(non_null.quantile(0.50))
+                    profile["q75"] = float(non_null.quantile(0.75))
+            elif pd.api.types.is_categorical_dtype(col) or col.dtype == object:
+                profile["dtype"] = "categorical"
+                if len(non_null) > 0:
+                    value_counts = non_null.astype(str).value_counts()
+                    profile["top"] = value_counts.index[0]
+                    profile["freq"] = int(value_counts.iloc[0])
+            else:
+                profile["dtype"] = "other"
+
+            profiles[column] = profile
+
+        return profiles
 
     @staticmethod
     def _categorical_drift(current: pd.Series, baseline: pd.Series) -> float:
