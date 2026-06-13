@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -62,7 +62,7 @@ def test_audit_detects_drift_against_reference() -> None:
 
 
 def test_report_serializes_to_json_and_markdown() -> None:
-    data = pd.DataFrame({"feature_a": [1.0, 2.0], "target": [0, 1]})
+    data = pd.DataFrame({"feature_a": [1.0, 2.0, 3.0], "target": [0, 1, 0]})
     auditor = DatasetAuditor()
     report = auditor.audit_dataframe(data, label_column="target", expected_columns=["feature_a", "target"])
 
@@ -221,3 +221,4 @@ class TestColumnRules:
         rule_issues = [i for i in report.issues if i.check == "rule"]
         assert len(rule_issues) == 1
         assert "feature_1" in rule_issues[0].column
+

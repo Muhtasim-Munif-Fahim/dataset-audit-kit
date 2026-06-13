@@ -198,6 +198,14 @@ class AuditReport:
                 if issue.column:
                     parts.insert(2, f"column `{issue.column}`")
                 lines.append(" ".join(parts))
+
+            # Summary counts by check type
+            from collections import Counter
+            check_counts = Counter(i.check for i in self.issues)
+            lines.append("")
+            lines.append("*Issue summary:*")
+            for check, count in check_counts.most_common():
+                lines.append(f"  - `{check}`: {count} issue(s)")
         else:
             lines.extend(["", "_No issues found._"])
 
@@ -463,130 +471,6 @@ class AuditReport:
 
 
 
-    @property
-    def fix_suggestions(self) -> list[dict[str, str]]:
-        """Generate actionable fix suggestions for each issue in the report."""
-        suggestions: list[dict[str, str]] = []
-        seen: set[str] = set()
-
-        for issue in self.issues:
-            key = f"{issue.check}:{issue.column or ''}"
-            if key in seen:
-                continue
-            seen.add(key)
-
-            suggestion: dict[str, str] = {
-                "issue": issue.message,
-                "severity": issue.severity,
-            }
-
-            if issue.check == "duplicates":
-                suggestion["action"] = "drop_duplicates"
-                suggestion["code"] = "df = df.drop_duplicates()"
-                suggestion["description"] = "Remove duplicate rows from the dataset."
-            elif issue.check == "missingness":
-                col = issue.column or ""
-                suggestion["action"] = "impute_median"
-                suggestion["code"] = f"df['{col}'] = df['{col}'].fillna(df['{col}'].median())"
-                suggestion["description"] = f"Impute missing values in '{col}' with the median."
-            elif issue.check == "schema" and "Missing expected columns" in issue.message:
-                suggestion["action"] = "add_columns"
-                suggestion["code"] = "df = df.reindex(columns=expected_columns)"
-                suggestion["description"] = "Add missing columns with NaN values."
-            elif issue.check == "schema" and "Unexpected columns" in issue.message:
-                suggestion["action"] = "drop_columns"
-                suggestion["code"] = "df = df[expected_columns]"
-                suggestion["description"] = "Drop columns not in the expected schema."
-            elif issue.check == "rule" and "above maximum" in issue.message:
-                suggestion["action"] = "clip_values"
-                col = issue.column or ""
-                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(upper=max_value)"
-                suggestion["description"] = f"Clip values in '{col}' to the allowed maximum."
-            elif issue.check == "rule" and "below minimum" in issue.message:
-                suggestion["action"] = "clip_values"
-                col = issue.column or ""
-                suggestion["code"] = f"df['{col}'] = df['{col}'].clip(lower=min_value)"
-                suggestion["description"] = f"Clip values in '{col}' to the allowed minimum."
-            elif issue.check == "rule" and "Unexpected values" in issue.message:
-                suggestion["action"] = "replace_values"
-                col = issue.column or ""
-                suggestion["code"] = f"df['{col}'] = df['{col}'].where(df['{col}'].isin(allowed_values), other=default)"
-                suggestion["description"] = f"Replace unexpected values in '{col}' with a default."
-            elif issue.check == "rule" and "missing column" in issue.message:
-                suggestion["action"] = "remove_rule"
-                col = issue.column or ""
-                suggestion["code"] = f"# Remove rule for '{col}' from rules config"
-                suggestion["description"] = f"Column '{col}' defined in rules but not in dataset."
-            elif issue.check == "labels" and "missing label" in issue.message:
-                suggestion["action"] = "drop_missing_labels"
-                col = issue.column or ""
-                suggestion["code"] = f"df = df.dropna(subset=['{col}'])"
-                suggestion["description"] = f"Drop rows with missing label values in '{col}'."
-            elif issue.check == "labels" and "imbalanced" in issue.message:
-                suggestion["action"] = "resample"
-                col = issue.column or ""
-                suggestion["code"] = "# Consider stratified sampling or class weighting"
-                suggestion["description"] = f"Address label imbalance in '{col}' via resampling or weighting."
-            elif issue.check == "drift":
-                suggestion["action"] = "investigate_drift"
-                suggestion["code"] = "# Review data pipeline for distribution shift source"
-                suggestion["description"] = "Investigate root cause of distribution drift."
-            elif issue.check == "correlation_drift":
-                suggestion["action"] = "investigate_correlation_shift"
-                suggestion["code"] = "# Compare feature generation logic between reference and current"
-                suggestion["description"] = "Investigate pairwise correlation structure change."
-            elif issue.check == "uniqueness":
-                col = issue.column or ""
-                suggestion["action"] = "deduplicate_column"
-                suggestion["code"] = f"df = df.drop_duplicates(subset=['{col}'])"
-                suggestion["description"] = f"Remove rows with duplicate values in '{col}'."
-            else:
-                suggestion["action"] = "manual_review"
-                suggestion["code"] = "# No automated fix available"
-                suggestion["description"] = "Manual review required."
-
-            suggestions.append(suggestion)
-
-        return suggestions
-
-    def to_file(self, path: str) -> str:
-        """Write the report to a file, auto-detecting format from extension.
-
-        Supported extensions:
-        - `.json` -- JSON format
-        - `.md` -- Markdown format
-        - `.html` -- HTML format
-
-        Parameters
-        ----------
-        path : str
-            Output file path.
-
-        Returns
-        -------
-        str
-            The path that was written to.
-        """
-        path_obj = Path(path)
-        suffix = path_obj.suffix.lower()
-
-        if suffix == ".json":
-            content = self.to_json()
-        elif suffix == ".md":
-            content = self.to_markdown()
-        elif suffix == ".html":
-            content = self.to_html()
-        else:
-            raise ValueError(
-                f"Unsupported report format '{suffix}'. "
-                "Supported formats are .json, .md, .html."
-            )
-
-        path_obj.write_text(content, encoding="utf-8")
-        return path
-
-
-
 class DatasetAuditor:
     """Run a small battery of quality checks over tabular data."""
 
@@ -646,10 +530,18 @@ class DatasetAuditor:
                 data, reference, issues, drift_threshold=self.drift_threshold
             )
 
+        # Schema diff between reference and current
+        schema_diff_summary: dict[str, dict[str, object]] = {}
+        if reference is not None:
+            schema_diff_summary = self._schema_diff(data, reference, issues)
+
         # Per-column validation rules
         self._apply_rules(data, issues)
 
         column_profiles = self._profile_columns(data)
+
+        # Redundancy / collinearity check
+        self._check_redundancy(data, issues, correlation_threshold=0.95)
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
 
@@ -940,6 +832,31 @@ class DatasetAuditor:
                             )
                         )
 
+            # --- IQR outlier detection ---
+            if rule.min_value is not None or rule.max_value is not None:
+                numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
+                if len(numeric) >= 4:
+                    q1 = float(numeric.quantile(0.25))
+                    q3 = float(numeric.quantile(0.75))
+                    iqr = q3 - q1
+                    if iqr > 0:
+                        lower_fence = q1 - 1.5 * iqr
+                        upper_fence = q3 + 1.5 * iqr
+                        low_outliers = int((numeric < max(lower_fence, rule.min_value if rule.min_value is not None else lower_fence)).sum())
+                        high_outliers = int((numeric > min(upper_fence, rule.max_value if rule.max_value is not None else upper_fence)).sum())
+                        total_outliers = low_outliers + high_outliers
+                        total = len(numeric)
+                        if total_outliers > 0 and total_outliers / max(total, 1) > 0.01:
+                            issues.append(
+                                AuditIssue(
+                                    check="rule",
+                                    severity="info",
+                                    message=f"{total_outliers} IQR outlier(s) detected ({total_outliers / max(total, 1) * 100:.1f}% of values).",
+                                    column=column_name,
+                                    observed=total_outliers,
+                                )
+                            )
+
             # --- allowed values ---
             if rule.allowed_values is not None:
                 allowed_set = set(str(v) for v in rule.allowed_values)
@@ -1064,6 +981,7 @@ class DatasetAuditor:
 
     @staticmethod
     def _profile_columns(data: pd.DataFrame) -> dict[str, dict[str, object]]:
+        """Build statistical profiles for all columns in the dataset."""
         profiles: dict[str, dict[str, object]] = {}
 
         for column in data.columns:
@@ -1078,19 +996,34 @@ class DatasetAuditor:
             if pd.api.types.is_numeric_dtype(col):
                 profile["dtype"] = "numeric"
                 if len(non_null) > 0:
-                    profile["min"] = float(non_null.min())
-                    profile["max"] = float(non_null.max())
-                    profile["mean"] = float(non_null.mean())
-                    profile["std"] = float(non_null.std(ddof=0))
-                    profile["q25"] = float(non_null.quantile(0.25))
-                    profile["q50"] = float(non_null.quantile(0.50))
-                    profile["q75"] = float(non_null.quantile(0.75))
+                    vals = non_null.astype(float)
+                    q1 = float(vals.quantile(0.25))
+                    q3 = float(vals.quantile(0.75))
+                    iqr = q3 - q1
+                    lower = q1 - 1.5 * iqr
+                    upper = q3 + 1.5 * iqr
+                    outliers = int(((vals < lower) | (vals > upper)).sum())
+                    profile["min"] = float(vals.min())
+                    profile["max"] = float(vals.max())
+                    profile["mean"] = float(vals.mean())
+                    profile["median"] = float(vals.median())
+                    profile["std"] = float(vals.std(ddof=0))
+                    profile["q25"] = q1
+                    profile["q50"] = float(vals.quantile(0.50))
+                    profile["q75"] = q3
+                    profile["skewness"] = float(vals.skew())
+                    profile["kurtosis"] = float(vals.kurtosis())
+                    profile["outliers_iqr"] = outliers
+                    profile["outlier_ratio"] = round(outliers / max(len(vals), 1), 4)
             elif pd.api.types.is_categorical_dtype(col) or col.dtype == object:
                 profile["dtype"] = "categorical"
                 if len(non_null) > 0:
                     value_counts = non_null.astype(str).value_counts()
                     profile["top"] = value_counts.index[0]
                     profile["freq"] = int(value_counts.iloc[0])
+                    profile["top_5"] = {
+                        str(k): int(v) for k, v in value_counts.head(5).items()
+                    }
             else:
                 profile["dtype"] = "other"
 
@@ -1107,3 +1040,116 @@ class DatasetAuditor:
         for category in categories:
             divergence += abs(float(current_dist.get(category, 0.0)) - float(baseline_dist.get(category, 0.0)))
         return divergence / 2.0
+
+    @staticmethod
+    def _check_redundancy(
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        correlation_threshold: float = 0.95,
+    ) -> None:
+        """Detect highly correlated numeric column pairs (redundancy)."""
+        numeric_cols = [
+            col for col in data.columns
+            if pd.api.types.is_numeric_dtype(data[col])
+        ]
+        if len(numeric_cols) < 2:
+            return
+
+        corr_matrix = data[numeric_cols].corr().abs()
+        seen_pairs: set[tuple[str, str]] = set()
+
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1, len(numeric_cols)):
+                col_i = numeric_cols[i]
+                col_j = numeric_cols[j]
+                r_val = float(corr_matrix.loc[col_i, col_j])
+                if r_val >= correlation_threshold:
+                    pair_key = tuple(sorted([col_i, col_j]))
+                    if pair_key not in seen_pairs:
+                        seen_pairs.add(pair_key)
+                        issues.append(
+                            AuditIssue(
+                                check="redundancy",
+                                severity="warning",
+                                message=(
+                                    f"Columns '{col_i}' and '{col_j}' are highly correlated "
+                                    f"(|r| = {r_val:.3f}), suggesting redundancy."
+                                ),
+                                observed=round(r_val, 4),
+                                threshold=correlation_threshold,
+                            )
+                        )
+
+    @staticmethod
+    def _schema_diff(
+        data: pd.DataFrame,
+        reference: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> dict[str, dict[str, object]]:
+        """Compare column schemas between current and reference datasets.
+
+        Returns a dict mapping column names to a diff description:
+        ``{"status": "added"|"removed"|"dtype_changed"|"same", "details": ...}``
+        """
+        diff: dict[str, dict[str, object]] = {}
+        current_cols = set(data.columns)
+        reference_cols = set(reference.columns)
+
+        # Columns added in current data
+        added_cols = current_cols - reference_cols
+        for col in sorted(added_cols):
+            diff[col] = {
+                "status": "added",
+                "dtype": str(data[col].dtype),
+            }
+            issues.append(
+                AuditIssue(
+                    check="schema_diff",
+                    severity="info",
+                    message=f"Column '{col}' added (dtype: {data[col].dtype}).",
+                    column=col,
+                )
+            )
+
+        # Columns removed from current data
+        removed_cols = reference_cols - current_cols
+        for col in sorted(removed_cols):
+            diff[col] = {
+                "status": "removed",
+                "dtype": str(reference[col].dtype),
+            }
+            issues.append(
+                AuditIssue(
+                    check="schema_diff",
+                    severity="warning",
+                    message=f"Column '{col}' removed from dataset.",
+                    column=col,
+                )
+            )
+
+        # Columns with changed dtype
+        shared_cols = current_cols & reference_cols
+        for col in sorted(shared_cols):
+            cur_dtype = str(data[col].dtype)
+            ref_dtype = str(reference[col].dtype)
+            if cur_dtype != ref_dtype:
+                diff[col] = {
+                    "status": "dtype_changed",
+                    "from_dtype": ref_dtype,
+                    "to_dtype": cur_dtype,
+                }
+                issues.append(
+                    AuditIssue(
+                        check="schema_diff",
+                        severity="warning",
+                        message=f"Column '{col}' dtype changed from '{ref_dtype}' to '{cur_dtype}'.",
+                        column=col,
+                        observed=cur_dtype,
+                        threshold=ref_dtype,
+                    )
+                )
+            else:
+                diff[col] = {"status": "same", "dtype": cur_dtype}
+
+        return diff
