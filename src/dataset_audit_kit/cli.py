@@ -11,6 +11,10 @@ from .core import DatasetAuditor, ValidationRules
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dataset-audit-kit")
+    parser.add_argument(
+        "--version", action="store_true",
+        help="Show version and exit",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     audit = subparsers.add_parser("audit", help="Audit a dataset file")
@@ -196,6 +200,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "version", False):
+        from . import __version__
+        print(f"dataset-audit-kit v{__version__}")
+        return 0
 
     if args.command == "audit":
         return _cmd_audit(args)
