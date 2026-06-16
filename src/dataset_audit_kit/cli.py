@@ -107,7 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
     columns_parser.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
 
+    head_parser = subparsers.add_parser("head", help="Preview the first N rows of a dataset")
+    head_parser.add_argument("data", help="Path to the dataset")
+    head_parser.add_argument("--rows", type=int, default=10, help="Number of rows (default: 10)")
+
     return parser
+
+
+def _cmd_head(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    print(data.head(args.rows).to_csv(index=False))
+    return 0
 
 
 def _cmd_columns(args: argparse.Namespace) -> int:
@@ -228,5 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_check(args)
     elif args.command == "columns":
         return _cmd_columns(args)
+    elif args.command == "head":
+        return _cmd_head(args)
     else:
         parser.error("unsupported command")
