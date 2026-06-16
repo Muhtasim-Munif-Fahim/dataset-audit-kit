@@ -103,7 +103,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write Markdown report to the specified path",
         default=None,
     )
+
+    columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
+    columns_parser.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+
     return parser
+
+
+def _cmd_columns(args: argparse.Namespace) -> int:
+    """Handle the columns subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    print(f"{'Column':<30} {'Dtype':<15} {'Non-null':<10} {'Missing':<10}")
+    print("-" * 65)
+    for col in data.columns:
+        non_null = data[col].count()
+        missing = int(data[col].isna().sum())
+        print(f"{col:<30} {str(data[col].dtype):<15} {non_null:<10} {missing:<10}")
+    return 0
 
 
 def _parse_columns(raw: str | None) -> Sequence[str] | None:
@@ -210,5 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_audit(args)
     elif args.command == "check":
         return _cmd_check(args)
+    elif args.command == "columns":
+        return _cmd_columns(args)
     else:
         parser.error("unsupported command")
