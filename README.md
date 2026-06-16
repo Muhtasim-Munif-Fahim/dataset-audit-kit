@@ -156,6 +156,8 @@ The repository includes a fully self-contained demo based on the public Iris dat
 - ~~Add Parquet and JSONL loaders~~ ✅ v0.1.2
 - ~~Add per-column validation rules~~ ✅ v0.2.0
 - ~~Add CI check for auditable sample datasets~~ ✅ v0.2.0
+- ~~Add columns subcommand~~ ✅ v0.3.0
+- ~~Add head subcommand~~ ✅ v0.3.0
 
 ## Tests
 
