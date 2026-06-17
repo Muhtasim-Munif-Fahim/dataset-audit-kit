@@ -112,6 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     head_parser.add_argument("data", help="Path to the dataset")
     head_parser.add_argument("--rows", type=int, default=10, help="Number of rows (default: 10)")
 
+    info_parser = subparsers.add_parser("info", help="Show dataset shape, memory usage, and dtypes")
+    info_parser.add_argument("data", help="Path to the dataset")
+
     return parser
 
 
@@ -224,6 +227,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_info(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    mem = data.memory_usage(deep=True).sum() / 1024 / 1024
+    print(f"Shape:  {data.shape[0]} rows x {data.shape[1]} columns")
+    print(f"Memory: {mem:.2f} MB")
+    print(f"Dtypes:")
+    for dt, cnt in data.dtypes.value_counts().items():
+        print(f"  {dt}: {cnt}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -241,5 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_columns(args)
     elif args.command == "head":
         return _cmd_head(args)
+    elif args.command == "info":
+        return _cmd_info(args)
     else:
         parser.error("unsupported command")
