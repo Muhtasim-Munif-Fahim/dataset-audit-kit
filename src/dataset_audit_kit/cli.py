@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="store_true",
         help="Show version and exit",
     )
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     audit = subparsers.add_parser("audit", help="Audit a dataset file")
