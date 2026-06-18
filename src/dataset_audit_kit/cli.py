@@ -125,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     unique_parser.add_argument("--column", required=True, help="Column name")
     unique_parser.add_argument("--top", type=int, default=20, help="Show top N values (default: 20)")
 
+    dtype_parser = subparsers.add_parser("dtype", help="Show column dtypes with inferred optimal types")
+    dtype_parser.add_argument("data", help="Path to the dataset")
+
     return parser
 
 
@@ -268,6 +271,18 @@ def _cmd_unique(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dtype(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    suggested = DatasetAuditor.infer_optimal_dtypes(data)
+    print(f"{'Column':<30} {'Current':<15} {'Suggested':<15}")
+    print("-" * 60)
+    for col in data.columns:
+        cur = str(data[col].dtype)
+        sug = suggested.get(col, {}).get("suggested_dtype", cur)
+        print(f"{col:<30} {cur:<15} {sug:<15}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -291,5 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_tail(args)
     elif args.command == "unique":
         return _cmd_unique(args)
+    elif args.command == "dtype":
+        return _cmd_dtype(args)
     else:
         parser.error("unsupported command")
