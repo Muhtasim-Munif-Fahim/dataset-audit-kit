@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     dtype_parser = subparsers.add_parser("dtype", help="Show column dtypes with inferred optimal types")
     dtype_parser.add_argument("data", help="Path to the dataset")
 
+    correlate_parser = subparsers.add_parser("correlate", help="Show pairwise correlation matrix")
+    correlate_parser.add_argument("data", help="Path to the dataset")
+    correlate_parser.add_argument("--method", default="pearson", choices=["pearson", "spearman", "kendall"], help="Correlation method")
+
     return parser
 
 
@@ -283,6 +287,17 @@ def _cmd_dtype(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_correlate(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    numeric = data.select_dtypes(include="number")
+    if numeric.empty:
+        print("No numeric columns found.", file=sys.stderr)
+        return 1
+    corr = numeric.corr(method=args.method)
+    print(corr.to_csv(float_format="%.4f"))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -308,5 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_unique(args)
     elif args.command == "dtype":
         return _cmd_dtype(args)
+    elif args.command == "correlate":
+        return _cmd_correlate(args)
     else:
         parser.error("unsupported command")
