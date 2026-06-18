@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
     tail_parser.add_argument("data", help="Path to the dataset")
     tail_parser.add_argument("--rows", type=int, default=10, help="Number of rows (default: 10)")
 
+    unique_parser = subparsers.add_parser("unique", help="Show unique values in a column")
+    unique_parser.add_argument("data", help="Path to the dataset")
+    unique_parser.add_argument("--column", required=True, help="Column name")
+    unique_parser.add_argument("--top", type=int, default=20, help="Show top N values (default: 20)")
+
     return parser
 
 
@@ -250,6 +255,19 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_unique(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    if args.column not in data.columns:
+        print(f"Column '{args.column}' not found.", file=sys.stderr)
+        return 1
+    counts = data[args.column].astype(str).value_counts().head(args.top)
+    print(f"{'Value':<40} {'Count':<10}")
+    print("-" * 50)
+    for val, cnt in counts.items():
+        print(f"{str(val):<40} {cnt:<10}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -271,5 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_info(args)
     elif args.command == "tail":
         return _cmd_tail(args)
+    elif args.command == "unique":
+        return _cmd_unique(args)
     else:
         parser.error("unsupported command")
