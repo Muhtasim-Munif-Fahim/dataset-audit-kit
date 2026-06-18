@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -114,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     info_parser = subparsers.add_parser("info", help="Show dataset shape, memory usage, and dtypes")
     info_parser.add_argument("data", help="Path to the dataset")
+
+    tail_parser = subparsers.add_parser("tail", help="Show the last N rows of a dataset")
+    tail_parser.add_argument("data", help="Path to the dataset")
+    tail_parser.add_argument("--rows", type=int, default=10, help="Number of rows (default: 10)")
 
     return parser
 
@@ -238,6 +243,13 @@ def _cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tail(args: argparse.Namespace) -> int:
+    import pandas as pd
+    data = DatasetAuditor.load_dataframe(args.data)
+    print(data.tail(args.rows).to_csv(index=False))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -257,5 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_head(args)
     elif args.command == "info":
         return _cmd_info(args)
+    elif args.command == "tail":
+        return _cmd_tail(args)
     else:
         parser.error("unsupported command")

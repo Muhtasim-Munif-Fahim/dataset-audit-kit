@@ -1,0 +1,15 @@
+LICENSE
+README.md
+pyproject.toml
+src/dataset_audit_kit/__init__.py
+src/dataset_audit_kit/__main__.py
+src/dataset_audit_kit/cli.py
+src/dataset_audit_kit/core.py
+src/dataset_audit_kit.egg-info/PKG-INFO
+src/dataset_audit_kit.egg-info/SOURCES.txt
+src/dataset_audit_kit.egg-info/dependency_links.txt
+src/dataset_audit_kit.egg-info/entry_points.txt
+src/dataset_audit_kit.egg-info/requires.txt
+src/dataset_audit_kit.egg-info/top_level.txt
+tests/test_cli.py
+tests/test_core.py
