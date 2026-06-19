@@ -629,6 +629,8 @@ class DatasetAuditor:
 
         if suffix == ".csv":
             return pd.read_csv(dataset_path)
+        if suffix == ".tsv":
+            return pd.read_csv(dataset_path, sep="\t")
         if suffix in {".jsonl", ".ndjson"}:
             return pd.read_json(dataset_path, lines=True)
         if suffix == ".parquet":
