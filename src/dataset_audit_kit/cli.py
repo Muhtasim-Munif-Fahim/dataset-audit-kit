@@ -132,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     correlate_parser.add_argument("data", help="Path to the dataset")
     correlate_parser.add_argument("--method", default="pearson", choices=["pearson", "spearman", "kendall"], help="Correlation method")
 
+    shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
+    shape_parser.add_argument("data", help="Path to the dataset")
+
     return parser
 
 
@@ -287,6 +290,12 @@ def _cmd_dtype(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_shape(args: argparse.Namespace) -> int:
+    data = DatasetAuditor.load_dataframe(args.data)
+    print(f"{data.shape[0]} rows x {data.shape[1]} columns")
+    return 0
+
+
 def _cmd_correlate(args: argparse.Namespace) -> int:
     data = DatasetAuditor.load_dataframe(args.data)
     numeric = data.select_dtypes(include="number")
@@ -325,5 +334,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_dtype(args)
     elif args.command == "correlate":
         return _cmd_correlate(args)
+    elif args.command == "shape":
+        return _cmd_shape(args)
     else:
         parser.error("unsupported command")
