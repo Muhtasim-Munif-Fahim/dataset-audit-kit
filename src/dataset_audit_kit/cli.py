@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
     columns_parser.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+    columns_parser.add_argument("--sort", choices=["name", "dtype", "missing"], default=None, help="Sort columns by the given criterion")
 
     head_parser = subparsers.add_parser("head", help="Preview the first N rows of a dataset")
     head_parser.add_argument("data", help="Path to the dataset")
@@ -154,9 +155,16 @@ def _cmd_head(args: argparse.Namespace) -> int:
 def _cmd_columns(args: argparse.Namespace) -> int:
     """Handle the columns subcommand."""
     data = DatasetAuditor.load_dataframe(args.data)
+    cols = list(data.columns)
+    if args.sort == "name":
+        cols.sort()
+    elif args.sort == "dtype":
+        cols.sort(key=lambda c: str(data[c].dtype))
+    elif args.sort == "missing":
+        cols.sort(key=lambda c: int(data[c].isna().sum()), reverse=True)
     print(f"{'Column':<30} {'Dtype':<15} {'Non-null':<10} {'Missing':<10}")
     print("-" * 65)
-    for col in data.columns:
+    for col in cols:
         non_null = data[col].count()
         missing = int(data[col].isna().sum())
         print(f"{col:<30} {str(data[col].dtype):<15} {non_null:<10} {missing:<10}")
