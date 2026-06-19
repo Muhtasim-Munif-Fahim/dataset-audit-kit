@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+
+import numpy as np
 from pathlib import Path
 from typing import Sequence
 
@@ -134,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
     shape_parser.add_argument("data", help="Path to the dataset")
+
+    hist_parser = subparsers.add_parser("hist", help="Show ASCII histogram for a numeric column")
+    hist_parser.add_argument("data", help="Path to the dataset")
+    hist_parser.add_argument("--column", required=True, help="Numeric column name")
+    hist_parser.add_argument("--bins", type=int, default=10, help="Number of bins")
 
     return parser
 
@@ -296,6 +303,27 @@ def _cmd_shape(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hist(args: argparse.Namespace) -> int:
+    import pandas as pd
+    data = DatasetAuditor.load_dataframe(args.data)
+    if args.column not in data.columns:
+        print(f"Column '{args.column}' not found.", file=sys.stderr)
+        return 1
+    col = data[args.column].dropna()
+    if not pd.api.types.is_numeric_dtype(col):
+        print(f"Column '{args.column}' is not numeric.", file=sys.stderr)
+        return 1
+    counts, edges = np.histogram(col, bins=args.bins)
+    max_count = max(counts) if len(counts) > 0 else 1
+    bar_width = 40
+    print(f"Histogram for '{args.column}' ({len(col)} values, {args.bins} bins):")
+    for i in range(len(counts)):
+        pct = counts[i] / max_count
+        bar = "█" * int(pct * bar_width)
+        print(f"{edges[i]:>8.2f}-{edges[i+1]:<8.2f} │{bar} {counts[i]}")
+    return 0
+
+
 def _cmd_correlate(args: argparse.Namespace) -> int:
     data = DatasetAuditor.load_dataframe(args.data)
     numeric = data.select_dtypes(include="number")
@@ -336,5 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_correlate(args)
     elif args.command == "shape":
         return _cmd_shape(args)
+    elif args.command == "hist":
+        return _cmd_hist(args)
     else:
         parser.error("unsupported command")
