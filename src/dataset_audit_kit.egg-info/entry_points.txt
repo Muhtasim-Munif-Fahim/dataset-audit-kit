@@ -1,2 +1,0 @@
-[console_scripts]
-dataset-audit-kit = dataset_audit_kit.cli:main

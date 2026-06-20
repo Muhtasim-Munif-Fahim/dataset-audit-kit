@@ -137,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
     shape_parser.add_argument("data", help="Path to the dataset")
+    shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
     hist_parser = subparsers.add_parser("hist", help="Show ASCII histogram for a numeric column")
     hist_parser.add_argument("data", help="Path to the dataset")
@@ -307,7 +308,10 @@ def _cmd_dtype(args: argparse.Namespace) -> int:
 
 def _cmd_shape(args: argparse.Namespace) -> int:
     data = DatasetAuditor.load_dataframe(args.data)
-    print(f"{data.shape[0]} rows x {data.shape[1]} columns")
+    if getattr(args, "csv", False):
+        print(f"{data.shape[0]},{data.shape[1]}")
+    else:
+        print(f"{data.shape[0]} rows x {data.shape[1]} columns")
     return 0
 
 
