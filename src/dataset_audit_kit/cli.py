@@ -376,7 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if getattr(args, "version", False):
         from . import __version__
-        print(f"dataset-audit-kit v{__version__}")
+        print(f"dataset-audit-kit v{__version__} (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
         return 0
 
     if args.command == "audit":
