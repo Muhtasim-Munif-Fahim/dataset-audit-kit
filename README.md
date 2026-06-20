@@ -65,7 +65,8 @@ print(report.to_markdown())
 dataset-audit-kit audit data.parquet \
   --reference reference.jsonl \
   --label-column target \
-  --expected-columns feature_1,feature_2,target
+  --expected-columns feature_1,feature_2,target \
+  --select-columns feature_1,feature_2,target
 ```
 
 Use `--json` if you want machine-readable output for automation.
@@ -73,6 +74,18 @@ Use `--json` if you want machine-readable output for automation.
 Use `--html-out report.html` to export a shareable standalone HTML report.
 
 Supported formats are `.csv`, `.jsonl`, `.ndjson`, and `.parquet`.
+
+### Shape
+
+```bash
+# Default output
+dataset-audit-kit shape data.csv
+# 1000 rows x 10 columns
+
+# CSV output for scripting
+dataset-audit-kit shape data.csv --csv
+# 1000,10
+```
 
 ### CI check
 
@@ -162,6 +175,8 @@ The repository includes a fully self-contained demo based on the public Iris dat
 - ~~Add unique subcommand~~ ✅ v0.3.3
 - ~~Add dtype subcommand~~ ✅ v0.3.3
 - ~~Add correlate subcommand~~ ✅ v0.3.3
+- ~~Add --csv flag to shape subcommand~~ ✅ v0.3.4
+- ~~Add --select-columns flag to audit subcommand~~ ✅ v0.3.4
 
 ## Tests
 
