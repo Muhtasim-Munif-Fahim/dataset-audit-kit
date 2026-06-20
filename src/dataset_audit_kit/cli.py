@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--select-columns",
+        help="Comma-separated columns to audit",
+        default=None,
+    )
+    audit.add_argument(
         "--fix-suggestions",
         action="store_true",
         help="Print fix suggestions for each issue",
@@ -186,13 +191,31 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         drift_threshold=args.drift_threshold,
         rules=ValidationRules.from_json(args.rules) if args.rules else None,
     )
-    report = auditor.audit_file(
-        args.data,
-        reference_path=args.reference,
-        label_column=args.label_column,
-        expected_columns=_parse_columns(args.expected_columns),
-        unique_columns=_parse_columns(args.unique_columns),
-    )
+
+    select_columns = _parse_columns(args.select_columns)
+    if select_columns:
+        data = DatasetAuditor.load_dataframe(args.data)
+        present = [c for c in select_columns if c in data.columns]
+        missing = [c for c in select_columns if c not in data.columns]
+        if missing:
+            print(f"Warning: requested columns not found in dataset: {missing}", file=sys.stderr)
+        data = data[present]
+        reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
+        report = auditor.audit_dataframe(
+            data,
+            reference=reference,
+            label_column=args.label_column,
+            expected_columns=_parse_columns(args.expected_columns),
+            unique_columns=_parse_columns(args.unique_columns),
+        )
+    else:
+        report = auditor.audit_file(
+            args.data,
+            reference_path=args.reference,
+            label_column=args.label_column,
+            expected_columns=_parse_columns(args.expected_columns),
+            unique_columns=_parse_columns(args.unique_columns),
+        )
 
     if args.html_out:
         html_path = Path(args.html_out)
