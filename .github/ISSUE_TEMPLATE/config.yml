@@ -1,0 +1,8 @@
+blank_issues: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/discussions
+    about: Ask questions before opening a bug report
+  - name: Security issue
+    url: https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/security/advisories/new
+    about: Report a vulnerability privately

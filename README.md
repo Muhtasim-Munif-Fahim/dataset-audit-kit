@@ -2,6 +2,7 @@
 
 [![Tests](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/actions/workflows/tests.yml/badge.svg)](https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI](https://img.shields.io/pypi/v/dataset-audit-kit.svg)](https://pypi.org/project/dataset-audit-kit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 `dataset-audit-kit` is a small Python library and CLI for dataset validation. It checks schema drift, missing values, duplicates, label consistency, and basic distribution shifts before a dataset reaches training or production.
@@ -153,6 +154,21 @@ The repository includes a fully self-contained demo based on the public Iris dat
 - Notebook: [`examples/demo.ipynb`](examples/demo.ipynb)
 
 ![Dataset audit demo](assets/demo-screenshot.svg)
+
+## How it compares
+
+`dataset-audit-kit` is intentionally **lightweight** — a fast pre-flight check, not a full data platform.
+
+| Capability | dataset-audit-kit | Pandera | Great Expectations |
+| --- | --- | --- | --- |
+| Install size / setup | Small, single CLI | Medium | Large, suite-oriented |
+| Schema + dtype checks | Yes | Yes | Yes |
+| Missingness / duplicates | Yes | Partial | Yes |
+| Reference drift signals | Yes (basic) | No | Yes (richer) |
+| CI `check` exit codes | Yes | Yes | Yes |
+| Best for | Quick audits before training | Typed DataFrame pipelines | Enterprise data contracts |
+
+Use this when you want a **maintainer-friendly OSS audit layer** before a training job or dataset release — not when you need a full observability platform.
 
 ## What It Reports
 

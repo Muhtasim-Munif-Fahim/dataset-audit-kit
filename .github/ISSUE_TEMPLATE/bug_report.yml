@@ -1,0 +1,25 @@
+name: Bug report
+description: Report incorrect validation behavior or a crash
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Steps to reproduce and expected vs actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dataset-audit-kit version
+      placeholder: "0.3.5"
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Minimal sample (CSV snippet or rules JSON)
+    validations:
+      required: false
