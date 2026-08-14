@@ -146,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
     columns_parser.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+    columns_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     columns_parser.add_argument("--sort", choices=["name", "dtype", "missing"], default=None, help="Sort columns by the given criterion")
 
     head_parser = subparsers.add_parser("head", help="Preview the first N rows of a dataset")
@@ -162,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     unique_parser = subparsers.add_parser("unique", help="Show unique values in a column")
     unique_parser.add_argument("data", help="Path to the dataset")
     unique_parser.add_argument("--column", required=True, help="Column name")
+    unique_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     unique_parser.add_argument("--top", type=int, default=20, help="Show top N values (default: 20)")
 
     dtype_parser = subparsers.add_parser("dtype", help="Show column dtypes with inferred optimal types")
@@ -169,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     correlate_parser = subparsers.add_parser("correlate", help="Show pairwise correlation matrix")
     correlate_parser.add_argument("data", help="Path to the dataset")
+    correlate_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     correlate_parser.add_argument("--method", default="pearson", choices=["pearson", "spearman", "kendall"], help="Correlation method")
 
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
@@ -253,6 +256,33 @@ def _cmd_head(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_table(frame: "pd.DataFrame", fmt: str) -> None:
+    """Print a frame as a fixed-width table, CSV, or Markdown."""
+
+    if fmt == "csv":
+        print(frame.to_csv(index=False).rstrip("\r\n"))
+        return
+
+    columns = [str(c) for c in frame.columns]
+    cells = [[("" if value is None else str(value)) for value in row] for row in frame.itertuples(index=False)]
+    widths = [
+        max(len(columns[i]), *(len(row[i]) for row in cells)) if cells else len(columns[i])
+        for i in range(len(columns))
+    ]
+
+    if fmt == "markdown":
+        print("| " + " | ".join(c.ljust(w) for c, w in zip(columns, widths)) + " |")
+        print("| " + " | ".join("-" * w for w in widths) + " |")
+        for row in cells:
+            print("| " + " | ".join(v.ljust(w) for v, w in zip(row, widths)) + " |")
+        return
+
+    print("  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip())
+    print("-" * (sum(widths) + 2 * (len(widths) - 1)))
+    for row in cells:
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip())
+
+
 def _cmd_columns(args: argparse.Namespace) -> int:
     """Handle the columns subcommand."""
     data = _load(args)
@@ -263,12 +293,15 @@ def _cmd_columns(args: argparse.Namespace) -> int:
         cols.sort(key=lambda c: str(data[c].dtype))
     elif args.sort == "missing":
         cols.sort(key=lambda c: int(data[c].isna().sum()), reverse=True)
-    print(f"{'Column':<30} {'Dtype':<15} {'Non-null':<10} {'Missing':<10}")
-    print("-" * 65)
-    for col in cols:
-        non_null = data[col].count()
-        missing = int(data[col].isna().sum())
-        print(f"{col:<30} {str(data[col].dtype):<15} {non_null:<10} {missing:<10}")
+    table = pd.DataFrame(
+        {
+            "Column": [str(col) for col in cols],
+            "Dtype": [str(data[col].dtype) for col in cols],
+            "Non-null": [int(data[col].count()) for col in cols],
+            "Missing": [int(data[col].isna().sum()) for col in cols],
+        }
+    )
+    _render_table(table, args.format)
     return 0
 
 
@@ -489,10 +522,10 @@ def _cmd_unique(args: argparse.Namespace) -> int:
         print(f"Column '{args.column}' not found.", file=sys.stderr)
         return 1
     counts = data[args.column].astype(str).value_counts().head(args.top)
-    print(f"{'Value':<40} {'Count':<10}")
-    print("-" * 50)
-    for val, cnt in counts.items():
-        print(f"{str(val):<40} {cnt:<10}")
+    table = pd.DataFrame(
+        {"Value": [str(v) for v in counts.index], "Count": [int(c) for c in counts.values]}
+    )
+    _render_table(table, args.format)
     return 0
 
 
@@ -563,8 +596,10 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     if numeric.empty:
         print("No numeric columns found.", file=sys.stderr)
         return 1
-    corr = numeric.corr(method=args.method)
-    print(corr.to_csv(float_format="%.4f"))
+    corr = numeric.corr(method=args.method).round(4)
+    # The index carries the row labels, so promote it to a real column.
+    table = corr.reset_index().rename(columns={"index": ""})
+    _render_table(table, args.format)
     return 0
 
 
