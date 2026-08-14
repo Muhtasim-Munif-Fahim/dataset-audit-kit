@@ -160,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    schema_parser = subparsers.add_parser("schema", help="Export the dataset schema as JSON Schema")
+    schema_parser.add_argument("data", help="Path to the dataset")
+    schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
+    schema_parser.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
+
     rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
     rename_parser.add_argument("data", help="Path to the dataset")
     rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
@@ -464,6 +469,66 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+#: pandas dtype kind -> (JSON Schema type, optional format)
+_JSON_SCHEMA_TYPES: dict[str, tuple[str, str | None]] = {
+    "b": ("boolean", None),
+    "i": ("integer", None),
+    "u": ("integer", None),
+    "f": ("number", None),
+    "M": ("string", "date-time"),
+    "m": ("string", "duration"),
+    "O": ("string", None),
+    "S": ("string", None),
+    "U": ("string", None),
+}
+
+
+def _cmd_schema(args: argparse.Namespace) -> int:
+    """Handle the schema subcommand."""
+    import json
+
+    data = _load(args)
+
+    properties: dict[str, dict[str, object]] = {}
+    required: list[str] = []
+
+    for column in data.columns:
+        series = data[column]
+        json_type, json_format = _JSON_SCHEMA_TYPES.get(series.dtype.kind, ("string", None))
+
+        has_missing = bool(series.isna().any())
+        # A column with gaps must admit null; one without becomes required.
+        entry: dict[str, object] = {
+            "type": [json_type, "null"] if has_missing else json_type
+        }
+        if json_format:
+            entry["format"] = json_format
+        if not has_missing:
+            required.append(str(column))
+
+        # Enumerate genuinely low-cardinality string columns; anything wider is
+        # data rather than a closed set.
+        if json_type == "string" and json_format is None:
+            values = series.dropna().unique()
+            if 0 < len(values) <= 20 and len(values) < len(series):
+                entry["enum"] = sorted(str(value) for value in values)
+
+        properties[str(column)] = entry
+
+    schema: dict[str, object] = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": args.title or Path(args.data).stem,
+        "description": f"Schema inferred from {Path(args.data).name} ({len(data)} rows).",
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        schema["required"] = required
+
+    print(json.dumps(schema, indent=args.indent, sort_keys=False))
+    return 0
+
+
 def _cmd_rename(args: argparse.Namespace) -> int:
     """Handle the rename subcommand."""
     mapping: dict[str, str] = {}
@@ -759,5 +824,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_profile(args)
     elif args.command == "rename":
         return _cmd_rename(args)
+    elif args.command == "schema":
+        return _cmd_schema(args)
     else:
         parser.error("unsupported command")
