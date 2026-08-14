@@ -6,6 +6,7 @@ import argparse
 import sys
 
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Sequence
 
@@ -143,6 +144,23 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
+
+    profile_parser = subparsers.add_parser("profile", help="Deep-dive a single column")
+    profile_parser.add_argument("data", help="Path to the dataset")
+    profile_parser.add_argument("--column", required=True, help="Column name")
+    profile_parser.add_argument("--top", type=int, default=10, help="Number of frequent values to show (default: 10)")
+
+    stats_parser = subparsers.add_parser("stats", help="Show dataset-level statistics")
+    stats_parser.add_argument("data", help="Path to the dataset")
+
+    missing_parser = subparsers.add_parser("missing", help="Report missing values per column")
+    missing_parser.add_argument("data", help="Path to the dataset")
+    missing_parser.add_argument("--threshold", type=float, default=0.0, help="Only show columns missing more than this fraction (default: 0.0)")
+    missing_parser.add_argument("--all", action="store_true", help="Include columns with no missing values")
+
+    describe_parser = subparsers.add_parser("describe", help="Show summary statistics for every column")
+    describe_parser.add_argument("data", help="Path to the dataset")
+    describe_parser.add_argument("--include", choices=["numeric", "categorical", "all"], default="all", help="Which columns to describe (default: all)")
 
     hist_parser = subparsers.add_parser("hist", help="Show ASCII histogram for a numeric column")
     hist_parser.add_argument("data", help="Path to the dataset")
@@ -370,6 +388,192 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Handle the profile subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    if args.column not in data.columns:
+        available = ", ".join(map(str, list(data.columns)[:10]))
+        print(f"Column '{args.column}' not found. Available: {available}", file=sys.stderr)
+        return 2
+
+    series = data[args.column]
+    total = len(series)
+    non_null = series.dropna()
+
+    def _row(label: str, value: object) -> None:
+        print(f"{label:<24}{value}")
+
+    print(f"Column: {args.column}")
+    print("=" * 56)
+    _row("Dtype", series.dtype)
+    _row("Rows", f"{total:,}")
+    _row("Non-null", f"{len(non_null):,}")
+    missing = total - len(non_null)
+    _row("Missing", f"{missing:,} ({missing / total:.1%})" if total else "0")
+    _row("Unique", f"{int(series.nunique(dropna=True)):,}")
+    if total:
+        _row("Cardinality ratio", f"{series.nunique(dropna=True) / total:.3f}")
+    _row("Memory", _human_bytes(int(series.memory_usage(deep=True))))
+
+    if non_null.empty:
+        print()
+        print("Column is entirely missing.")
+        return 0
+
+    if pd.api.types.is_numeric_dtype(series):
+        print()
+        print("Distribution")
+        print("-" * 56)
+        described = non_null.describe()
+        for key in ("mean", "std", "min", "25%", "50%", "75%", "max"):
+            if key in described:
+                _row(key, f"{described[key]:.6g}")
+        _row("zeros", f"{int((non_null == 0).sum()):,}")
+        _row("negatives", f"{int((non_null < 0).sum()):,}")
+    else:
+        print()
+        print(f"Top {args.top} values")
+        print("-" * 56)
+        counts = non_null.value_counts().head(args.top)
+        for value, count in counts.items():
+            share = count / len(non_null)
+            print(f"{str(value)[:29]:<30}{int(count):>8}{share:>9.1%}")
+
+    return 0
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    """Handle the stats subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    rows, cols = data.shape
+    cells = rows * cols
+
+    numeric = data.select_dtypes(include="number").shape[1]
+    datetime_cols = data.select_dtypes(include="datetime").shape[1]
+    boolean = data.select_dtypes(include="bool").shape[1]
+    other = cols - numeric - datetime_cols - boolean
+
+    missing = int(data.isna().sum().sum())
+    duplicates = int(data.duplicated().sum())
+    constant = [c for c in data.columns if data[c].nunique(dropna=False) <= 1]
+    memory = int(data.memory_usage(deep=True).sum())
+
+    def _row(label: str, value: object) -> None:
+        print(f"{label:<26}{value}")
+
+    _row("Rows", f"{rows:,}")
+    _row("Columns", f"{cols:,}")
+    _row("Cells", f"{cells:,}")
+    _row("Memory", _human_bytes(memory))
+    print()
+    _row("Numeric columns", numeric)
+    _row("Datetime columns", datetime_cols)
+    _row("Boolean columns", boolean)
+    _row("Other columns", other)
+    print()
+    _row("Missing cells", f"{missing:,} ({missing / cells:.1%})" if cells else "0")
+    _row("Rows with any missing", f"{int(data.isna().any(axis=1).sum()):,}")
+    _row("Duplicate rows", f"{duplicates:,}")
+    _row("Constant columns", f"{len(constant)}" + (f" ({', '.join(map(str, constant[:5]))})" if constant else ""))
+    return 0
+
+
+def _human_bytes(size: int) -> str:
+    """Render a byte count in the largest unit that keeps it above 1."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _cmd_missing(args: argparse.Namespace) -> int:
+    """Handle the missing subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    rows = len(data)
+    if rows == 0:
+        print("Dataset has no rows.")
+        return 0
+
+    counts = data.isna().sum().sort_values(ascending=False)
+    total_missing = int(counts.sum())
+
+    print(f"{'Column':<30}{'Missing':>10}{'Percent':>10}")
+    print("-" * 50)
+    shown = 0
+    for column, count in counts.items():
+        count = int(count)
+        ratio = count / rows
+        if not args.all and (count == 0 or ratio <= args.threshold):
+            continue
+        print(f"{str(column)[:29]:<30}{count:>10}{ratio:>9.1%}")
+        shown += 1
+
+    if shown == 0:
+        print("(no columns above the threshold)")
+
+    print("-" * 50)
+    cells = rows * len(data.columns)
+    overall = total_missing / cells if cells else 0.0
+    print(f"{'TOTAL':<30}{total_missing:>10}{overall:>9.1%}")
+    print()
+    print(
+        f"{rows} rows x {len(data.columns)} columns; "
+        f"{int((data.isna().any(axis=1)).sum())} row(s) have at least one missing value."
+    )
+    return 0
+
+
+def _cmd_describe(args: argparse.Namespace) -> int:
+    """Handle the describe subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+
+    numeric = data.select_dtypes(include="number")
+    categorical = data.select_dtypes(exclude="number")
+
+    if args.include == "numeric":
+        categorical = categorical.iloc[:, :0]
+    elif args.include == "categorical":
+        numeric = numeric.iloc[:, :0]
+
+    if numeric.empty and categorical.empty:
+        print("No columns to describe.")
+        return 0
+
+    if not numeric.empty:
+        print("Numeric columns")
+        print("-" * 78)
+        print(f"{'Column':<22}{'count':>8}{'mean':>12}{'std':>12}{'min':>12}{'max':>12}")
+        for column in numeric.columns:
+            series = numeric[column]
+            print(
+                f"{str(column)[:21]:<22}{int(series.count()):>8}"
+                f"{series.mean():>12.4g}{series.std():>12.4g}"
+                f"{series.min():>12.4g}{series.max():>12.4g}"
+            )
+
+    if not categorical.empty:
+        if not numeric.empty:
+            print()
+        print("Categorical columns")
+        print("-" * 78)
+        print(f"{'Column':<22}{'count':>8}{'unique':>10}{'top':>20}{'freq':>10}")
+        for column in categorical.columns:
+            series = categorical[column].dropna()
+            if series.empty:
+                print(f"{str(column)[:21]:<22}{0:>8}{0:>10}{'-':>20}{'-':>10}")
+                continue
+            counts = series.value_counts()
+            print(
+                f"{str(column)[:21]:<22}{int(series.count()):>8}"
+                f"{int(series.nunique()):>10}{str(counts.index[0])[:19]:>20}"
+                f"{int(counts.iloc[0]):>10}"
+            )
+
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -401,5 +605,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_shape(args)
     elif args.command == "hist":
         return _cmd_hist(args)
+    elif args.command == "describe":
+        return _cmd_describe(args)
+    elif args.command == "missing":
+        return _cmd_missing(args)
+    elif args.command == "stats":
+        return _cmd_stats(args)
+    elif args.command == "profile":
+        return _cmd_profile(args)
     else:
         parser.error("unsupported command")
