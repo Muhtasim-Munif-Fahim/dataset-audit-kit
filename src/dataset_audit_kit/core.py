@@ -5,13 +5,19 @@ from __future__ import annotations
 import html
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 import pandas as pd
 
 #: Compression suffixes pandas can infer from a filename, for text formats.
 COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
+
+#: URL schemes pandas hands to fsspec rather than opening from the filesystem.
+REMOTE_SCHEMES = (
+    "s3://", "gs://", "gcs://", "az://", "abfs://", "adl://",
+    "http://", "https://", "ftp://", "sftp://", "hdfs://",
+)
 
 
 def _format_stat(value: object, places: int = 3) -> str:
@@ -666,6 +672,9 @@ class DatasetAuditor:
         sniffed, since the extension says nothing about the format.
         """
 
+        if DatasetAuditor._is_remote(path):
+            return DatasetAuditor._load_remote(str(path), encoding, delimiter)
+
         dataset_path = Path(path)
         suffix = DatasetAuditor._data_suffix(dataset_path)
 
@@ -725,7 +734,44 @@ class DatasetAuditor:
         return best if counts[best] else ","
 
     @staticmethod
-    def _data_suffix(dataset_path: Path) -> str:
+    def _is_remote(path: str | Path) -> bool:
+        """True when the path is a URL pandas should fetch rather than open."""
+
+        return str(path).startswith(REMOTE_SCHEMES)
+
+    @staticmethod
+    def _load_remote(
+        url: str, encoding: str | None, delimiter: str | None
+    ) -> pd.DataFrame:
+        """Read a dataset from a remote URL.
+
+        pandas delegates object-store URLs to fsspec, so the URL is handed over
+        untouched — normalizing it through Path would collapse the `//` after
+        the scheme. Only the suffix is inspected here, to pick a reader.
+        """
+
+        # Strip any query string before looking at the extension.
+        without_query = url.split("?", 1)[0].split("#", 1)[0]
+        suffix = DatasetAuditor._data_suffix(PurePosixPath(without_query))
+
+        if suffix in {".csv", ".tsv", ".txt"}:
+            sep = delimiter or (",", "\t")[suffix == ".tsv"]
+            return pd.read_csv(url, sep=sep, encoding=encoding)
+        if suffix in {".jsonl", ".ndjson"}:
+            return pd.read_json(url, lines=True, encoding=encoding)
+        if suffix == ".parquet":
+            return pd.read_parquet(url)
+        if suffix in {".xlsx", ".xls"}:
+            return pd.read_excel(url, engine="openpyxl" if suffix == ".xlsx" else "xlrd")
+
+        raise ValueError(
+            f"Unsupported dataset format for remote path `{url}`. "
+            "Supported formats are .csv, .tsv, .txt, .jsonl, .ndjson, .parquet, "
+            "and .xlsx/.xls."
+        )
+
+    @staticmethod
+    def _data_suffix(dataset_path: Path | PurePosixPath) -> str:
         """Return the format suffix, ignoring a trailing compression suffix."""
 
         suffixes = [suffix.lower() for suffix in dataset_path.suffixes]
