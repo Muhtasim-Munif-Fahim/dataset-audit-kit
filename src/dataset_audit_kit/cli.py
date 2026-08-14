@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print fix suggestions for each issue",
     )
     audit.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Print only the status line and issue count",
+    )
+    audit.add_argument(
         "--save-json",
         help="Write JSON report to the specified path",
         default=None,
@@ -107,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Print only the status line and issue count",
     )
     check.add_argument(
         "--save-json",
@@ -295,7 +305,11 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         html_path = Path(args.html_out)
         html_path.write_text(report.to_html(), encoding="utf-8")
 
-    if args.json:
+    if args.minimal:
+        errors = sum(1 for issue in report.issues if issue.severity == "error")
+        status = "PASS" if not report.issues else "FAIL"
+        print(f"[{status}] {len(report.issues)} issue(s), {errors} error(s).")
+    elif args.json:
         print(report.to_json())
     else:
         print(report.to_markdown())
@@ -344,19 +358,25 @@ def _cmd_check(args: argparse.Namespace) -> int:
     )
 
     if report.issues:
-        print(report.to_markdown())
+        if not args.minimal:
+            print(report.to_markdown())
         if args.save_json:
             report.to_file(args.save_json)
         if args.save_markdown:
             report.to_file(args.save_markdown)
-        print(f"\n[FAIL] Found {len(report.issues)} issue(s) - check failed.", flush=True)
+        errors = sum(1 for issue in report.issues if issue.severity == "error")
+        summary = f"[FAIL] {len(report.issues)} issue(s), {errors} error(s) - check failed."
+        print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
     if args.save_json:
         report.to_file(args.save_json)
     if args.save_markdown:
         report.to_file(args.save_markdown)
-    print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
+    if args.minimal:
+        print("[PASS] 0 issue(s).")
+    else:
+        print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
     return 0
 
 
