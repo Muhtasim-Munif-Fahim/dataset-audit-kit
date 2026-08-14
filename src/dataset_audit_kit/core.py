@@ -544,6 +544,8 @@ class DatasetAuditor:
                 )
             )
 
+        self._check_column_names(data, issues)
+
         if expected_columns is not None:
             self._check_schema(data, expected_columns, issues)
 
@@ -685,6 +687,73 @@ class DatasetAuditor:
                     )
                 )
         return missingness
+
+    def _check_column_names(self, data: pd.DataFrame, issues: list[AuditIssue]) -> None:
+        """Flag column names that tend to break downstream tooling.
+
+        These are warnings, not errors: pandas is happy with any of them, but
+        they routinely cause trouble once the frame reaches SQL, Parquet
+        round-trips, ``df.query`` or attribute access.
+        """
+
+        seen: dict[str, str] = {}
+        for column in data.columns:
+            name = str(column)
+
+            if name != name.strip():
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="warning",
+                        message="Column name has leading or trailing whitespace.",
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+
+            if not name.strip():
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="error",
+                        message="Column name is empty or whitespace only.",
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+                continue
+
+            if any(char.isspace() for char in name.strip()):
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="warning",
+                        message=(
+                            "Column name contains whitespace, which blocks "
+                            "attribute access and needs quoting in df.query()."
+                        ),
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+
+            lowered = name.strip().lower()
+            if lowered in seen and seen[lowered] != name:
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="error",
+                        message=(
+                            f"Column name differs from `{seen[lowered]}` only by case "
+                            "or surrounding whitespace, which collides in "
+                            "case-insensitive stores such as SQL Server."
+                        ),
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+            else:
+                seen.setdefault(lowered, name)
 
     def _check_schema(
         self,
