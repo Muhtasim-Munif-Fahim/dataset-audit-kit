@@ -272,8 +272,21 @@ class AuditReport:
             drift_rows.append(f"<tr><td>{esc(column)}</td><td>{score:.3f}</td></tr>")
 
         label_rows = []
+        label_total = sum(self.label_distribution.values())
+        label_peak = max(self.label_distribution.values(), default=0)
         for label, count in self.label_distribution.items():
-            label_rows.append(f"<tr><td>{esc(label)}</td><td>{count}</td></tr>")
+            share = count / label_total if label_total else 0.0
+            # Bars are scaled against the largest class, so the smallest class
+            # stays visible instead of collapsing to nothing.
+            width = (count / label_peak * 100) if label_peak else 0.0
+            label_rows.append(
+                f"<tr><td>{esc(label)}</td><td>{count}</td>"
+                f"<td>{share:.1%}</td>"
+                f'<td class="bar-cell">'
+                f'<span class="bar" style="width:{width:.2f}%"'
+                f' title="{esc(label)}: {count} ({share:.1%})"></span>'
+                f"</td></tr>"
+            )
 
         sections = [
             "<!doctype html>",
@@ -295,6 +308,12 @@ class AuditReport:
             ".pass{color:#166534;}",
             ".warn{color:#b45309;}",
             ".muted{color:#6b7280;}",
+            # Label distribution bars: pure CSS, no scripts or images, so the
+            # report stays a single self-contained file that opens offline.
+            ".label-table td:nth-child(2),.label-table td:nth-child(3){text-align:right;white-space:nowrap;}",
+            ".label-table .bar-cell{width:55%;padding:10px 12px;}",
+            ".bar{display:block;height:14px;min-width:2px;border-radius:7px;background:linear-gradient(90deg,#2563eb,#60a5fa);}",
+            "@media print{.bar{background:#2563eb;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}",
             "</style>",
             "</head>",
             "<body>",
@@ -313,7 +332,8 @@ class AuditReport:
         if label_rows:
             sections.extend([
                 "<h2>Label distribution</h2>",
-                "<table><thead><tr><th>Label</th><th>Count</th></tr></thead><tbody>",
+                '<table class="label-table"><thead><tr><th>Label</th><th>Count</th>'
+                '<th>Share</th><th>Distribution</th></tr></thead><tbody>',
                 *label_rows,
                 "</tbody></table>",
             ])
