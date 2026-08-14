@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Sequence
@@ -12,6 +13,56 @@ import pandas as pd
 
 #: Compression suffixes pandas can infer from a filename, for text formats.
 COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
+
+#: Row count above which an audit reports progress unless told otherwise.
+PROGRESS_ROW_THRESHOLD = 100_000
+
+#: Ordered names of the audit phases, used for progress reporting.
+_AUDIT_PHASES = (
+    "missingness",
+    "duplicates",
+    "column names",
+    "schema",
+    "uniqueness",
+    "label balance",
+    "drift",
+    "rules",
+    "profiles",
+    "redundancy",
+)
+
+
+class _Progress:
+    """Minimal stderr progress reporter for a fixed number of phases.
+
+    Deliberately not tqdm: a progress indicator is not worth a runtime
+    dependency, and writing to stderr keeps it clear of a report redirected to
+    stdout. Each update rewrites one line, and the line is erased on close so
+    it leaves no residue in a captured log.
+    """
+
+    def __init__(self, enabled: bool, total: int) -> None:
+        self.enabled = enabled
+        self.total = max(total, 1)
+        self.done = 0
+        self._width = 0
+
+    def advance(self, label: str) -> None:
+        if not self.enabled:
+            return
+        self.done += 1
+        filled = int(self.done / self.total * 20)
+        bar = "#" * filled + "-" * (20 - filled)
+        line = f"\rauditing [{bar}] {self.done}/{self.total} {label}"
+        self._width = max(self._width, len(line))
+        sys.stderr.write(line.ljust(self._width))
+        sys.stderr.flush()
+
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        sys.stderr.write("\r" + " " * self._width + "\r")
+        sys.stderr.flush()
 
 #: URL schemes pandas hands to fsspec rather than opening from the filesystem.
 REMOTE_SCHEMES = (
@@ -560,11 +611,22 @@ class DatasetAuditor:
         drift_threshold: float = 0.20,
         label_min_share: float = 0.05,
         rules: ValidationRules | None = None,
+        progress: bool | None = None,
     ) -> None:
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
         self.label_min_share = label_min_share
         self.rules = rules
+        #: None means "decide from the row count"; True/False force it.
+        self.progress = progress
+
+    def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
+        enabled = (
+            self.progress
+            if self.progress is not None
+            else len(data) >= PROGRESS_ROW_THRESHOLD
+        )
+        return _Progress(enabled, total=len(_AUDIT_PHASES))
 
     def audit_dataframe(
         self,
@@ -579,7 +641,10 @@ class DatasetAuditor:
             raise TypeError("data must be a pandas.DataFrame")
 
         issues: list[AuditIssue] = []
+        progress = self._progress_reporter(data)
+        progress.advance("missingness")
         missingness = self._missingness(data, issues)
+        progress.advance("duplicates")
         duplicate_rows = int(data.duplicated().sum())
         if duplicate_rows:
             issues.append(
@@ -591,18 +656,23 @@ class DatasetAuditor:
                 )
             )
 
+        progress.advance("column names")
         self._check_column_names(data, issues)
 
+        progress.advance("schema")
         if expected_columns is not None:
             self._check_schema(data, expected_columns, issues)
 
+        progress.advance("uniqueness")
         if unique_columns is not None:
             self._check_uniqueness(data, unique_columns, issues)
 
+        progress.advance("label balance")
         label_distribution: dict[str, int] = {}
         if label_column is not None and label_column in data.columns:
             label_distribution = self._check_label_balance(data, label_column, issues)
 
+        progress.advance("drift")
         drift_scores: dict[str, float] = {}
         correlation_drift_scores: dict[str, float] = {}
         if reference is not None:
@@ -616,13 +686,18 @@ class DatasetAuditor:
         if reference is not None:
             schema_diff_summary = self._schema_diff(data, reference, issues)
 
+        progress.advance("rules")
         # Per-column validation rules
         self._apply_rules(data, issues)
 
+        progress.advance("profiles")
         column_profiles = self._profile_columns(data)
 
+        progress.advance("redundancy")
         # Redundancy / collinearity check
         self._check_redundancy(data, issues, correlation_threshold=0.95)
+
+        progress.close()
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
 

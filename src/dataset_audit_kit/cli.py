@@ -98,6 +98,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--progress",
+        dest="progress",
+        action="store_true",
+        default=None,
+        help="Always show audit progress (default: only above 100k rows)",
+    )
+    audit.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        help="Never show audit progress",
+    )
+    audit.add_argument(
         "--minimal",
         action="store_true",
         help="Print only the status line and issue count",
@@ -127,6 +140,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--progress",
+        dest="progress",
+        action="store_true",
+        default=None,
+        help="Always show audit progress (default: only above 100k rows)",
+    )
+    check.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        help="Never show audit progress",
     )
     check.add_argument(
         "--minimal",
@@ -369,6 +395,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
         rules=ValidationRules.from_json(args.rules) if args.rules else None,
+        progress=getattr(args, "progress", None),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -474,6 +501,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
         rules=ValidationRules.from_json(args.rules) if args.rules else None,
+        progress=getattr(args, "progress", None),
     )
     report = auditor.audit_file(
         args.data,
