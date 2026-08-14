@@ -10,6 +10,9 @@ from typing import Sequence
 
 import pandas as pd
 
+#: Compression suffixes pandas can infer from a filename, for text formats.
+COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
+
 
 @dataclass(frozen=True)
 class AuditIssue:
@@ -622,10 +625,15 @@ class DatasetAuditor:
 
     @staticmethod
     def load_dataframe(path: str | Path) -> pd.DataFrame:
-        """Load a tabular dataset from CSV, JSONL/NDJSON, Parquet, or Excel."""
+        """Load a tabular dataset from CSV, TSV, JSONL/NDJSON, Parquet, or Excel.
+
+        Text formats may additionally carry a compression suffix, for example
+        ``.csv.gz``. pandas infers the codec from the filename, so the suffix is
+        only stripped here to work out which reader to dispatch to.
+        """
 
         dataset_path = Path(path)
-        suffix = dataset_path.suffix.lower()
+        suffix = DatasetAuditor._data_suffix(dataset_path)
 
         if suffix == ".csv":
             return pd.read_csv(dataset_path)
@@ -640,8 +648,20 @@ class DatasetAuditor:
 
         raise ValueError(
             f"Unsupported dataset format for `{dataset_path}`. "
-            "Supported formats are .csv, .jsonl, .ndjson, .parquet, and .xlsx/.xls."
+            "Supported formats are .csv, .tsv, .jsonl, .ndjson, .parquet, and "
+            ".xlsx/.xls, optionally compressed with "
+            f"{', '.join(sorted(COMPRESSION_SUFFIXES))}."
         )
+
+    @staticmethod
+    def _data_suffix(dataset_path: Path) -> str:
+        """Return the format suffix, ignoring a trailing compression suffix."""
+
+        suffixes = [suffix.lower() for suffix in dataset_path.suffixes]
+        if suffixes and suffixes[-1] in COMPRESSION_SUFFIXES:
+            # `.csv.gz` -> `.csv`; a bare `.gz` leaves nothing to dispatch on.
+            return suffixes[-2] if len(suffixes) > 1 else ""
+        return dataset_path.suffix.lower()
 
     def _missingness(self, data: pd.DataFrame, issues: list[AuditIssue]) -> dict[str, float]:
         ratios = (data.isna().mean()).sort_values(ascending=False)
