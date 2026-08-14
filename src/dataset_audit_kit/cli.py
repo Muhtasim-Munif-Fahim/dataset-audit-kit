@@ -144,6 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    stats_parser = subparsers.add_parser("stats", help="Show dataset-level statistics")
+    stats_parser.add_argument("data", help="Path to the dataset")
+
     missing_parser = subparsers.add_parser("missing", help="Report missing values per column")
     missing_parser.add_argument("data", help="Path to the dataset")
     missing_parser.add_argument("--threshold", type=float, default=0.0, help="Only show columns missing more than this fraction (default: 0.0)")
@@ -379,6 +382,52 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stats(args: argparse.Namespace) -> int:
+    """Handle the stats subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    rows, cols = data.shape
+    cells = rows * cols
+
+    numeric = data.select_dtypes(include="number").shape[1]
+    datetime_cols = data.select_dtypes(include="datetime").shape[1]
+    boolean = data.select_dtypes(include="bool").shape[1]
+    other = cols - numeric - datetime_cols - boolean
+
+    missing = int(data.isna().sum().sum())
+    duplicates = int(data.duplicated().sum())
+    constant = [c for c in data.columns if data[c].nunique(dropna=False) <= 1]
+    memory = int(data.memory_usage(deep=True).sum())
+
+    def _row(label: str, value: object) -> None:
+        print(f"{label:<26}{value}")
+
+    _row("Rows", f"{rows:,}")
+    _row("Columns", f"{cols:,}")
+    _row("Cells", f"{cells:,}")
+    _row("Memory", _human_bytes(memory))
+    print()
+    _row("Numeric columns", numeric)
+    _row("Datetime columns", datetime_cols)
+    _row("Boolean columns", boolean)
+    _row("Other columns", other)
+    print()
+    _row("Missing cells", f"{missing:,} ({missing / cells:.1%})" if cells else "0")
+    _row("Rows with any missing", f"{int(data.isna().any(axis=1).sum()):,}")
+    _row("Duplicate rows", f"{duplicates:,}")
+    _row("Constant columns", f"{len(constant)}" + (f" ({', '.join(map(str, constant[:5]))})" if constant else ""))
+    return 0
+
+
+def _human_bytes(size: int) -> str:
+    """Render a byte count in the largest unit that keeps it above 1."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 def _cmd_missing(args: argparse.Namespace) -> int:
     """Handle the missing subcommand."""
     data = DatasetAuditor.load_dataframe(args.data)
@@ -500,5 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_describe(args)
     elif args.command == "missing":
         return _cmd_missing(args)
+    elif args.command == "stats":
+        return _cmd_stats(args)
     else:
         parser.error("unsupported command")
