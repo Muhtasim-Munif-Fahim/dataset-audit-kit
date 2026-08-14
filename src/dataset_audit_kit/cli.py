@@ -178,6 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    refs_parser = subparsers.add_parser("refs", help="Check referential integrity against a parent table")
+    refs_parser.add_argument("data", help="Path to the child dataset (the one holding the foreign key)")
+    refs_parser.add_argument("--key", required=True, help="Foreign key column in the child dataset")
+    refs_parser.add_argument("--parent", required=True, help="Path to the parent dataset")
+    refs_parser.add_argument("--parent-key", default=None, help="Key column in the parent (defaults to --key)")
+    refs_parser.add_argument("--show", type=int, default=10, help="Number of orphan values to list (default: 10)")
+    refs_parser.add_argument("--fail-on-orphans", action="store_true", help="Exit 1 if any orphaned keys are found")
+
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
     diff_parser.add_argument("current", help="Path to the later report")
@@ -617,6 +625,77 @@ _JSON_SCHEMA_TYPES: dict[str, tuple[str, str | None]] = {
 }
 
 
+def _key_strings(series: "pd.Series") -> "pd.Series":
+    """Render a key column as strings that compare across dtypes.
+
+    A key column containing a null is read as float64, so a plain astype(str)
+    turns 1 into "1.0" and it stops matching a parent key of "1". Integral
+    floats are therefore narrowed back to integers before stringifying.
+    """
+
+    values = series.dropna()
+    if pd.api.types.is_float_dtype(values) and (values == values.round()).all():
+        return values.astype("int64").astype(str)
+    return values.astype(str)
+
+
+def _cmd_refs(args: argparse.Namespace) -> int:
+    """Handle the refs subcommand."""
+    child = _load(args)
+    parent_key = args.parent_key or args.key
+
+    if args.key not in child.columns:
+        print(f"Column '{args.key}' not found in child dataset.", file=sys.stderr)
+        return 2
+    try:
+        parent = DatasetAuditor.load_dataframe(
+            args.parent,
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Cannot read parent dataset '{args.parent}': {exc}", file=sys.stderr)
+        return 2
+    if parent_key not in parent.columns:
+        print(f"Column '{parent_key}' not found in parent dataset.", file=sys.stderr)
+        return 2
+
+    child_values = _key_strings(child[args.key])
+    parent_values = set(_key_strings(parent[parent_key]))
+
+    orphan_mask = ~child_values.isin(parent_values)
+    orphan_rows = int(orphan_mask.sum())
+    orphan_values = sorted(set(child_values[orphan_mask]))
+
+    null_keys = int(child[args.key].isna().sum())
+    duplicate_parent = int(parent[parent_key].dropna().duplicated().sum())
+
+    print(f"Child   : {args.data} ({len(child)} rows, key '{args.key}')")
+    print(f"Parent  : {args.parent} ({len(parent)} rows, key '{parent_key}')")
+    print("-" * 60)
+    print(f"{'Rows with a key':<28}{len(child_values):>10}")
+    print(f"{'Null keys':<28}{null_keys:>10}")
+    print(f"{'Orphaned rows':<28}{orphan_rows:>10}")
+    print(f"{'Distinct orphaned values':<28}{len(orphan_values):>10}")
+    if duplicate_parent:
+        print(f"{'Duplicate parent keys':<28}{duplicate_parent:>10}  <-- parent key is not unique")
+
+    if orphan_values:
+        print()
+        print(f"Orphaned values (first {min(args.show, len(orphan_values))}):")
+        for value in orphan_values[: args.show]:
+            print(f"  {value}")
+        if len(orphan_values) > args.show:
+            print(f"  ... and {len(orphan_values) - args.show} more")
+    else:
+        print()
+        print("No orphaned keys: every child key is present in the parent.")
+
+    if args.fail_on_orphans and (orphan_rows or duplicate_parent):
+        return 1
+    return 0
+
+
 def _cmd_diff(args: argparse.Namespace) -> int:
     """Handle the diff subcommand."""
     import json
@@ -1043,5 +1122,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_schema(args)
     elif args.command == "diff":
         return _cmd_diff(args)
+    elif args.command == "refs":
+        return _cmd_refs(args)
     else:
         parser.error("unsupported command")
