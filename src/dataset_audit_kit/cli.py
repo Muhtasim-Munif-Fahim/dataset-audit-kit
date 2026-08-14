@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--exclude-columns",
+        help="Comma-separated columns to leave out of the audit",
+        default=None,
+    )
+    audit.add_argument(
         "--fix-suggestions",
         action="store_true",
         help="Print fix suggestions for each issue",
@@ -211,12 +216,26 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     )
 
     select_columns = _parse_columns(args.select_columns)
-    if select_columns:
+    exclude_columns = _parse_columns(getattr(args, "exclude_columns", None))
+    if select_columns and exclude_columns:
+        print(
+            "Error: --select-columns and --exclude-columns are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 2
+    if select_columns or exclude_columns:
         data = DatasetAuditor.load_dataframe(args.data)
-        present = [c for c in select_columns if c in data.columns]
-        missing = [c for c in select_columns if c not in data.columns]
+        if select_columns:
+            present = [c for c in select_columns if c in data.columns]
+            missing = [c for c in select_columns if c not in data.columns]
+        else:
+            missing = [c for c in exclude_columns if c not in data.columns]
+            present = [c for c in data.columns if c not in set(exclude_columns)]
         if missing:
             print(f"Warning: requested columns not found in dataset: {missing}", file=sys.stderr)
+        if not present:
+            print("Error: no columns left to audit after filtering.", file=sys.stderr)
+            return 2
         data = data[present]
         reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
         report = auditor.audit_dataframe(
