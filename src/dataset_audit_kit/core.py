@@ -14,6 +14,24 @@ import pandas as pd
 COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
 
 
+def _format_stat(value: object, places: int = 3) -> str:
+    """Render a summary statistic, tolerating a missing or non-numeric value.
+
+    A numeric column that is entirely missing has no mean or standard
+    deviation, so the profile carries None (or NaN) for them.
+    """
+
+    if value is None:
+        return "?"
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    if number != number:  # NaN
+        return "?"
+    return f"{number:.{places}f}"
+
+
 @dataclass(frozen=True)
 class AuditIssue:
     """A single dataset-quality issue."""
@@ -172,7 +190,10 @@ class AuditReport:
                 lines.append(f"- Count: {count}, Missing: {profile.get('missing', 0)} ({missing_pct}), Unique: {profile.get('unique', '?')}")
                 if dtype == "numeric":
                     lines.append(f"- Range: {profile.get('min', '?')} - {profile.get('max', '?')}")
-                    lines.append(f"- Mean: {profile.get('mean', '?'):.3f}, Std: {profile.get('std', '?'):.3f}")
+                    lines.append(
+                        f"- Mean: {_format_stat(profile.get('mean'))}, "
+                        f"Std: {_format_stat(profile.get('std'))}"
+                    )
                     lines.append(f"- Quartiles: Q1={profile.get('q25', '?')} Q2={profile.get('q50', '?')} Q3={profile.get('q75', '?')}")
                 elif dtype == "categorical":
                     top_val = profile.get("top", "?")
