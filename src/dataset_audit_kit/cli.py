@@ -150,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
+    rename_parser.add_argument("data", help="Path to the dataset")
+    rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
+    rename_parser.add_argument("--output", required=True, help="Path to write the renamed dataset to")
+    rename_parser.add_argument("--force", action="store_true", help="Overwrite the output file if it exists")
+
     profile_parser = subparsers.add_parser("profile", help="Deep-dive a single column")
     profile_parser.add_argument("data", help="Path to the dataset")
     profile_parser.add_argument("--column", required=True, help="Column name")
@@ -407,6 +413,57 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rename(args: argparse.Namespace) -> int:
+    """Handle the rename subcommand."""
+    mapping: dict[str, str] = {}
+    for pair in args.map:
+        if "=" not in pair:
+            print(f"Invalid --map value '{pair}'; expected OLD=NEW.", file=sys.stderr)
+            return 2
+        old, new = pair.split("=", 1)
+        old, new = old.strip(), new.strip()
+        if not old or not new:
+            print(f"Invalid --map value '{pair}'; both sides must be non-empty.", file=sys.stderr)
+            return 2
+        mapping[old] = new
+
+    output = Path(args.output)
+    if output.exists() and not args.force:
+        print(f"Refusing to overwrite existing file '{output}'; pass --force.", file=sys.stderr)
+        return 2
+
+    data = DatasetAuditor.load_dataframe(args.data)
+
+    unknown = [old for old in mapping if old not in data.columns]
+    if unknown:
+        print(f"Column(s) not found in dataset: {unknown}", file=sys.stderr)
+        return 2
+
+    renamed = data.rename(columns=mapping)
+    duplicates = renamed.columns[renamed.columns.duplicated()].tolist()
+    if duplicates:
+        print(f"Refusing to write: rename would create duplicate column(s) {duplicates}.", file=sys.stderr)
+        return 2
+
+    suffix = DatasetAuditor._data_suffix(output)
+    if suffix == ".csv":
+        renamed.to_csv(output, index=False)
+    elif suffix == ".tsv":
+        renamed.to_csv(output, sep="\t", index=False)
+    elif suffix in {".jsonl", ".ndjson"}:
+        renamed.to_json(output, orient="records", lines=True)
+    elif suffix == ".parquet":
+        renamed.to_parquet(output, index=False)
+    else:
+        print(f"Unsupported output format '{suffix}'. Use .csv, .tsv, .jsonl or .parquet.", file=sys.stderr)
+        return 2
+
+    for old, new in mapping.items():
+        print(f"{old} -> {new}")
+    print(f"Wrote {len(renamed)} rows to {output}")
+    return 0
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     """Handle the profile subcommand."""
     data = DatasetAuditor.load_dataframe(args.data)
@@ -632,5 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_stats(args)
     elif args.command == "profile":
         return _cmd_profile(args)
+    elif args.command == "rename":
+        return _cmd_rename(args)
     else:
         parser.error("unsupported command")
