@@ -83,6 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print fix suggestions for each issue",
     )
     audit.add_argument(
+        "--date-column",
+        help="Column to apply --from-date/--to-date to",
+        default=None,
+    )
+    audit.add_argument(
+        "--from-date",
+        help="Keep rows on or after this date (YYYY-MM-DD)",
+        default=None,
+    )
+    audit.add_argument(
+        "--to-date",
+        help="Keep rows on or before this date (YYYY-MM-DD)",
+        default=None,
+    )
+    audit.add_argument(
         "--minimal",
         action="store_true",
         help="Print only the status line and issue count",
@@ -131,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
     columns_parser.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+    columns_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     columns_parser.add_argument("--sort", choices=["name", "dtype", "missing"], default=None, help="Sort columns by the given criterion")
 
     head_parser = subparsers.add_parser("head", help="Preview the first N rows of a dataset")
@@ -147,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     unique_parser = subparsers.add_parser("unique", help="Show unique values in a column")
     unique_parser.add_argument("data", help="Path to the dataset")
     unique_parser.add_argument("--column", required=True, help="Column name")
+    unique_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     unique_parser.add_argument("--top", type=int, default=20, help="Show top N values (default: 20)")
 
     dtype_parser = subparsers.add_parser("dtype", help="Show column dtypes with inferred optimal types")
@@ -154,11 +171,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     correlate_parser = subparsers.add_parser("correlate", help="Show pairwise correlation matrix")
     correlate_parser.add_argument("data", help="Path to the dataset")
+    correlate_parser.add_argument("--format", choices=["table", "csv", "markdown"], default="table", help="Output format (default: table)")
     correlate_parser.add_argument("--method", default="pearson", choices=["pearson", "spearman", "kendall"], help="Correlation method")
 
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
+
+    diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
+    diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
+    diff_parser.add_argument("current", help="Path to the later report")
+    diff_parser.add_argument("--fail-on-regression", action="store_true", help="Exit 1 if quality dropped or issues were added")
 
     schema_parser = subparsers.add_parser("schema", help="Export the dataset schema as JSON Schema")
     schema_parser.add_argument("data", help="Path to the dataset")
@@ -233,6 +256,33 @@ def _cmd_head(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_table(frame: "pd.DataFrame", fmt: str) -> None:
+    """Print a frame as a fixed-width table, CSV, or Markdown."""
+
+    if fmt == "csv":
+        print(frame.to_csv(index=False).rstrip("\r\n"))
+        return
+
+    columns = [str(c) for c in frame.columns]
+    cells = [[("" if value is None else str(value)) for value in row] for row in frame.itertuples(index=False)]
+    widths = [
+        max(len(columns[i]), *(len(row[i]) for row in cells)) if cells else len(columns[i])
+        for i in range(len(columns))
+    ]
+
+    if fmt == "markdown":
+        print("| " + " | ".join(c.ljust(w) for c, w in zip(columns, widths)) + " |")
+        print("| " + " | ".join("-" * w for w in widths) + " |")
+        for row in cells:
+            print("| " + " | ".join(v.ljust(w) for v, w in zip(row, widths)) + " |")
+        return
+
+    print("  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip())
+    print("-" * (sum(widths) + 2 * (len(widths) - 1)))
+    for row in cells:
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip())
+
+
 def _cmd_columns(args: argparse.Namespace) -> int:
     """Handle the columns subcommand."""
     data = _load(args)
@@ -243,12 +293,15 @@ def _cmd_columns(args: argparse.Namespace) -> int:
         cols.sort(key=lambda c: str(data[c].dtype))
     elif args.sort == "missing":
         cols.sort(key=lambda c: int(data[c].isna().sum()), reverse=True)
-    print(f"{'Column':<30} {'Dtype':<15} {'Non-null':<10} {'Missing':<10}")
-    print("-" * 65)
-    for col in cols:
-        non_null = data[col].count()
-        missing = int(data[col].isna().sum())
-        print(f"{col:<30} {str(data[col].dtype):<15} {non_null:<10} {missing:<10}")
+    table = pd.DataFrame(
+        {
+            "Column": [str(col) for col in cols],
+            "Dtype": [str(data[col].dtype) for col in cols],
+            "Non-null": [int(data[col].count()) for col in cols],
+            "Missing": [int(data[col].isna().sum()) for col in cols],
+        }
+    )
+    _render_table(table, args.format)
     return 0
 
 
@@ -257,6 +310,49 @@ def _parse_columns(raw: str | None) -> Sequence[str] | None:
         return None
     columns = [part.strip() for part in raw.split(",") if part.strip()]
     return columns or None
+
+
+def _apply_date_filter(
+    data: "pd.DataFrame", args: argparse.Namespace
+) -> "tuple[pd.DataFrame | None, str | None]":
+    """Filter rows by a date range. Returns (frame, error message)."""
+
+    if not args.from_date and not args.to_date:
+        return data, None
+
+    column = args.date_column
+    if column is None:
+        candidates = [
+            name for name in data.columns
+            if pd.api.types.is_datetime64_any_dtype(data[name])
+        ]
+        if len(candidates) != 1:
+            return None, (
+                "Cannot infer which column to filter on "
+                f"({len(candidates)} datetime column(s) found). "
+                "Pass --date-column."
+            )
+        column = candidates[0]
+    elif column not in data.columns:
+        return None, f"Column '{column}' not found in dataset."
+
+    parsed = pd.to_datetime(data[column], errors="coerce")
+    if parsed.isna().all():
+        return None, f"Column '{column}' holds no parseable dates."
+
+    mask = pd.Series(True, index=data.index)
+    for bound, comparison in ((args.from_date, "ge"), (args.to_date, "le")):
+        if not bound:
+            continue
+        try:
+            edge = pd.Timestamp(bound)
+        except ValueError:
+            return None, f"Cannot parse date '{bound}'; expected YYYY-MM-DD."
+        mask &= getattr(parsed, comparison)(edge)
+
+    # Rows whose date failed to parse cannot be placed in the range.
+    mask &= parsed.notna()
+    return data[mask], None
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
@@ -275,20 +371,37 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if select_columns or exclude_columns:
+    date_filtered = bool(args.from_date or args.to_date)
+    if select_columns or exclude_columns or date_filtered:
         data = _load(args)
+        if date_filtered:
+            before = len(data)
+            data, error = _apply_date_filter(data, args)
+            if error:
+                print(f"Error: {error}", file=sys.stderr)
+                return 2
+            if data.empty:
+                print("Error: no rows fall within the requested date range.", file=sys.stderr)
+                return 2
+            print(
+                f"Date filter kept {len(data)} of {before} row(s).",
+                file=sys.stderr,
+            )
+        present: list[str] = []
+        missing: list[str] = []
         if select_columns:
             present = [c for c in select_columns if c in data.columns]
             missing = [c for c in select_columns if c not in data.columns]
-        else:
+        elif exclude_columns:
             missing = [c for c in exclude_columns if c not in data.columns]
             present = [c for c in data.columns if c not in set(exclude_columns)]
         if missing:
             print(f"Warning: requested columns not found in dataset: {missing}", file=sys.stderr)
-        if not present:
-            print("Error: no columns left to audit after filtering.", file=sys.stderr)
-            return 2
-        data = data[present]
+        if select_columns or exclude_columns:
+            if not present:
+                print("Error: no columns left to audit after filtering.", file=sys.stderr)
+                return 2
+            data = data[present]
         reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
         report = auditor.audit_dataframe(
             data,
@@ -409,10 +522,10 @@ def _cmd_unique(args: argparse.Namespace) -> int:
         print(f"Column '{args.column}' not found.", file=sys.stderr)
         return 1
     counts = data[args.column].astype(str).value_counts().head(args.top)
-    print(f"{'Value':<40} {'Count':<10}")
-    print("-" * 50)
-    for val, cnt in counts.items():
-        print(f"{str(val):<40} {cnt:<10}")
+    table = pd.DataFrame(
+        {"Value": [str(v) for v in counts.index], "Count": [int(c) for c in counts.values]}
+    )
+    _render_table(table, args.format)
     return 0
 
 
@@ -483,8 +596,10 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     if numeric.empty:
         print("No numeric columns found.", file=sys.stderr)
         return 1
-    corr = numeric.corr(method=args.method)
-    print(corr.to_csv(float_format="%.4f"))
+    corr = numeric.corr(method=args.method).round(4)
+    # The index carries the row labels, so promote it to a real column.
+    table = corr.reset_index().rename(columns={"index": ""})
+    _render_table(table, args.format)
     return 0
 
 
@@ -500,6 +615,87 @@ _JSON_SCHEMA_TYPES: dict[str, tuple[str, str | None]] = {
     "S": ("string", None),
     "U": ("string", None),
 }
+
+
+def _cmd_diff(args: argparse.Namespace) -> int:
+    """Handle the diff subcommand."""
+    import json
+
+    reports = {}
+    for label, path in (("baseline", args.baseline), ("current", args.current)):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                reports[label] = json.load(handle)
+        except OSError as exc:
+            print(f"Cannot read {label} report '{path}': {exc}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as exc:
+            print(
+                f"{label.capitalize()} report '{path}' is not valid JSON: {exc}. "
+                "Reports come from `audit --save-json`.",
+                file=sys.stderr,
+            )
+            return 2
+
+    before, after = reports["baseline"], reports["current"]
+
+    def _num(report: dict, key: str) -> float:
+        value = report.get(key, 0)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    print(f"{'Metric':<20}{'baseline':>12}{'current':>12}{'change':>12}")
+    print("-" * 56)
+    regressed = False
+    for key in ("quality_score", "rows", "columns", "duplicate_rows", "missing_cells"):
+        old, new = _num(before, key), _num(after, key)
+        delta = new - old
+        # Higher is better for quality_score; for the rest, higher is worse.
+        if key == "quality_score":
+            worse = delta < 0
+        else:
+            worse = delta > 0 and key in {"duplicate_rows", "missing_cells"}
+        regressed = regressed or worse
+        marker = "  <-- worse" if worse else ""
+        print(f"{key:<20}{old:>12.0f}{new:>12.0f}{delta:>+12.0f}{marker}")
+
+    old_issues = {_issue_key(i) for i in before.get("issues", [])}
+    new_issues = {_issue_key(i) for i in after.get("issues", [])}
+
+    added = sorted(new_issues - old_issues)
+    resolved = sorted(old_issues - new_issues)
+    regressed = regressed or bool(added)
+
+    print()
+    print(f"Issues: {len(old_issues)} -> {len(new_issues)} "
+          f"({len(added)} added, {len(resolved)} resolved)")
+    for key in added:
+        print(f"  + {key}")
+    for key in resolved:
+        print(f"  - {key}")
+
+    before_columns = set(before.get("column_profiles", {}))
+    after_columns = set(after.get("column_profiles", {}))
+    dropped, gained = sorted(before_columns - after_columns), sorted(after_columns - before_columns)
+    if dropped or gained:
+        print()
+        print("Schema changes:")
+        for column in dropped:
+            print(f"  - {column} (dropped)")
+        for column in gained:
+            print(f"  + {column} (new)")
+        regressed = regressed or bool(dropped)
+
+    if args.fail_on_regression and regressed:
+        return 1
+    return 0
+
+
+def _issue_key(issue: dict) -> str:
+    """Identify an issue by what it is about, not by its wording."""
+    check = issue.get("check", "?")
+    column = issue.get("column")
+    severity = issue.get("severity", "?")
+    return f"[{severity}] {check}" + (f" on '{column}'" if column else "")
 
 
 def _cmd_schema(args: argparse.Namespace) -> int:
@@ -845,5 +1041,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_rename(args)
     elif args.command == "schema":
         return _cmd_schema(args)
+    elif args.command == "diff":
+        return _cmd_diff(args)
     else:
         parser.error("unsupported command")
