@@ -450,12 +450,31 @@ def _cmd_hist(args: argparse.Namespace) -> int:
     counts, edges = np.histogram(col, bins=args.bins)
     max_count = max(counts) if len(counts) > 0 else 1
     bar_width = 40
+    block, divider = _bar_glyphs()
     print(f"Histogram for '{args.column}' ({len(col)} values, {args.bins} bins):")
     for i in range(len(counts)):
         pct = counts[i] / max_count
-        bar = "█" * int(pct * bar_width)
-        print(f"{edges[i]:>8.2f}-{edges[i+1]:<8.2f} │{bar} {counts[i]}")
+        bar = block * int(pct * bar_width)
+        print(f"{edges[i]:>8.2f}-{edges[i+1]:<8.2f} {divider}{bar} {counts[i]}")
     return 0
+
+
+def _bar_glyphs() -> tuple[str, str]:
+    """Return (bar, divider) glyphs the current stdout can actually encode.
+
+    The Windows console defaults to cp1252, which cannot encode the block and
+    box-drawing characters, so printing them raised UnicodeEncodeError and the
+    histogram died halfway through its header.
+    """
+
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    for candidate in (("█", "│"), ("#", "|")):
+        try:
+            "".join(candidate).encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            continue
+        return candidate
+    return ("#", "|")
 
 
 def _cmd_correlate(args: argparse.Namespace) -> int:
