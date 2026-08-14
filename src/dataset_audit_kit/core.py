@@ -626,7 +626,11 @@ class DatasetAuditor:
         )
 
     @staticmethod
-    def load_dataframe(path: str | Path, encoding: str | None = None) -> pd.DataFrame:
+    def load_dataframe(
+        path: str | Path,
+        encoding: str | None = None,
+        delimiter: str | None = None,
+    ) -> pd.DataFrame:
         """Load a tabular dataset from CSV, TSV, JSONL/NDJSON, Parquet, or Excel.
 
         Text formats may additionally carry a compression suffix, for example
@@ -635,15 +639,20 @@ class DatasetAuditor:
 
         ``encoding`` applies to the text formats only; Parquet and Excel carry
         their own encoding information and ignore it.
+
+        ``delimiter`` overrides the separator for delimited text. Without it,
+        ``.csv`` and ``.tsv`` use their conventional separators and ``.txt`` is
+        sniffed, since the extension says nothing about the format.
         """
 
         dataset_path = Path(path)
         suffix = DatasetAuditor._data_suffix(dataset_path)
 
-        if suffix == ".csv":
-            return pd.read_csv(dataset_path, encoding=encoding)
-        if suffix == ".tsv":
-            return pd.read_csv(dataset_path, sep="\t")
+        if suffix in {".csv", ".tsv", ".txt"}:
+            sep = delimiter or DatasetAuditor._default_delimiter(
+                suffix, dataset_path, encoding
+            )
+            return pd.read_csv(dataset_path, sep=sep, encoding=encoding)
         if suffix in {".jsonl", ".ndjson"}:
             return pd.read_json(dataset_path, lines=True, encoding=encoding)
         if suffix == ".parquet":
@@ -653,10 +662,46 @@ class DatasetAuditor:
 
         raise ValueError(
             f"Unsupported dataset format for `{dataset_path}`. "
-            "Supported formats are .csv, .tsv, .jsonl, .ndjson, .parquet, and "
-            ".xlsx/.xls, optionally compressed with "
+            "Supported formats are .csv, .tsv, .txt, .jsonl, .ndjson, .parquet, "
+            "and .xlsx/.xls, optionally compressed with "
             f"{', '.join(sorted(COMPRESSION_SUFFIXES))}."
         )
+
+    @staticmethod
+    def _default_delimiter(
+        suffix: str, dataset_path: Path, encoding: str | None
+    ) -> str:
+        """Pick a separator for a delimited text file.
+
+        ``.csv`` and ``.tsv`` name their separator by convention. ``.txt`` does
+        not, so the first non-empty line is sniffed against the delimiters that
+        actually occur in exported data. Sniffing failures fall back to a comma
+        rather than raising, so a one-column ``.txt`` still loads.
+        """
+
+        if suffix == ".csv":
+            return ","
+        if suffix == ".tsv":
+            return "\t"
+
+        try:
+            with open(
+                dataset_path, "r", encoding=encoding or "utf-8", newline=""
+            ) as handle:
+                sample = handle.readline()
+                while sample.strip() == "" and sample != "":
+                    sample = handle.readline()
+        except (OSError, UnicodeDecodeError):
+            return ","
+
+        if not sample.strip():
+            return ","
+
+        # csv.Sniffer misreads text containing prose, so count instead: the
+        # candidate appearing most often on the header line wins.
+        counts = {candidate: sample.count(candidate) for candidate in ("\t", "|", ";", ",")}
+        best = max(counts, key=lambda candidate: counts[candidate])
+        return best if counts[best] else ","
 
     @staticmethod
     def _data_suffix(dataset_path: Path) -> str:

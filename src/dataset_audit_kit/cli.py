@@ -186,13 +186,23 @@ def build_parser() -> argparse.ArgumentParser:
             help="Text encoding of the input file (e.g. latin-1, cp1252). "
                  "Ignored for .parquet and Excel inputs.",
         )
+        subparser.add_argument(
+            "--delimiter",
+            default=None,
+            help="Field separator for delimited text. Defaults to the "
+                 "convention for .csv/.tsv and is sniffed for .txt.",
+        )
 
     return parser
 
 
 def _load(args: argparse.Namespace) -> "pd.DataFrame":
     """Load the dataset named by args, honouring --encoding when given."""
-    return DatasetAuditor.load_dataframe(args.data, encoding=getattr(args, "encoding", None))
+    return DatasetAuditor.load_dataframe(
+        args.data,
+        encoding=getattr(args, "encoding", None),
+        delimiter=getattr(args, "delimiter", None),
+    )
 
 
 def _cmd_head(args: argparse.Namespace) -> int:
