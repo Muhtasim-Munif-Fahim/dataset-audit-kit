@@ -6,6 +6,7 @@ import argparse
 import sys
 
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Sequence
 
@@ -143,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser = subparsers.add_parser("shape", help="Show dataset shape (rows x columns)")
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
+
+    profile_parser = subparsers.add_parser("profile", help="Deep-dive a single column")
+    profile_parser.add_argument("data", help="Path to the dataset")
+    profile_parser.add_argument("--column", required=True, help="Column name")
+    profile_parser.add_argument("--top", type=int, default=10, help="Number of frequent values to show (default: 10)")
 
     stats_parser = subparsers.add_parser("stats", help="Show dataset-level statistics")
     stats_parser.add_argument("data", help="Path to the dataset")
@@ -382,6 +388,60 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Handle the profile subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    if args.column not in data.columns:
+        available = ", ".join(map(str, list(data.columns)[:10]))
+        print(f"Column '{args.column}' not found. Available: {available}", file=sys.stderr)
+        return 2
+
+    series = data[args.column]
+    total = len(series)
+    non_null = series.dropna()
+
+    def _row(label: str, value: object) -> None:
+        print(f"{label:<24}{value}")
+
+    print(f"Column: {args.column}")
+    print("=" * 56)
+    _row("Dtype", series.dtype)
+    _row("Rows", f"{total:,}")
+    _row("Non-null", f"{len(non_null):,}")
+    missing = total - len(non_null)
+    _row("Missing", f"{missing:,} ({missing / total:.1%})" if total else "0")
+    _row("Unique", f"{int(series.nunique(dropna=True)):,}")
+    if total:
+        _row("Cardinality ratio", f"{series.nunique(dropna=True) / total:.3f}")
+    _row("Memory", _human_bytes(int(series.memory_usage(deep=True))))
+
+    if non_null.empty:
+        print()
+        print("Column is entirely missing.")
+        return 0
+
+    if pd.api.types.is_numeric_dtype(series):
+        print()
+        print("Distribution")
+        print("-" * 56)
+        described = non_null.describe()
+        for key in ("mean", "std", "min", "25%", "50%", "75%", "max"):
+            if key in described:
+                _row(key, f"{described[key]:.6g}")
+        _row("zeros", f"{int((non_null == 0).sum()):,}")
+        _row("negatives", f"{int((non_null < 0).sum()):,}")
+    else:
+        print()
+        print(f"Top {args.top} values")
+        print("-" * 56)
+        counts = non_null.value_counts().head(args.top)
+        for value, count in counts.items():
+            share = count / len(non_null)
+            print(f"{str(value)[:29]:<30}{int(count):>8}{share:>9.1%}")
+
+    return 0
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     """Handle the stats subcommand."""
     data = DatasetAuditor.load_dataframe(args.data)
@@ -551,5 +611,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_missing(args)
     elif args.command == "stats":
         return _cmd_stats(args)
+    elif args.command == "profile":
+        return _cmd_profile(args)
     else:
         parser.error("unsupported command")
