@@ -186,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="Text encoding of the input file (e.g. latin-1, cp1252). "
                  "Ignored for .parquet and Excel inputs.",
         )
+        # `rename` already defines --output as its destination file.
+        if "output" not in {action.dest for action in subparser._actions}:
+            subparser.add_argument(
+                "--output", "-o",
+                default=None,
+                help="Write this command's output to a file instead of stdout.",
+            )
         subparser.add_argument(
             "--delimiter",
             default=None,
@@ -677,6 +684,23 @@ def _cmd_describe(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # `rename` takes --output as its destination file, so it is not a redirect.
+    redirect = getattr(args, "output", None) if args.command != "rename" else None
+    if redirect:
+        import contextlib
+
+        try:
+            handle = open(redirect, "w", encoding="utf-8", newline="")
+        except OSError as exc:
+            print(f"Cannot write to '{redirect}': {exc}", file=sys.stderr)
+            return 2
+        with handle, contextlib.redirect_stdout(handle):
+            return _dispatch(args, parser)
+    return _dispatch(args, parser)
+
+
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
     if getattr(args, "version", False):
         from . import __version__
