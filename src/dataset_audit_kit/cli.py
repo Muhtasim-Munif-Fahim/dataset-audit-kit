@@ -83,6 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print fix suggestions for each issue",
     )
     audit.add_argument(
+        "--date-column",
+        help="Column to apply --from-date/--to-date to",
+        default=None,
+    )
+    audit.add_argument(
+        "--from-date",
+        help="Keep rows on or after this date (YYYY-MM-DD)",
+        default=None,
+    )
+    audit.add_argument(
+        "--to-date",
+        help="Keep rows on or before this date (YYYY-MM-DD)",
+        default=None,
+    )
+    audit.add_argument(
         "--minimal",
         action="store_true",
         help="Print only the status line and issue count",
@@ -264,6 +279,49 @@ def _parse_columns(raw: str | None) -> Sequence[str] | None:
     return columns or None
 
 
+def _apply_date_filter(
+    data: "pd.DataFrame", args: argparse.Namespace
+) -> "tuple[pd.DataFrame | None, str | None]":
+    """Filter rows by a date range. Returns (frame, error message)."""
+
+    if not args.from_date and not args.to_date:
+        return data, None
+
+    column = args.date_column
+    if column is None:
+        candidates = [
+            name for name in data.columns
+            if pd.api.types.is_datetime64_any_dtype(data[name])
+        ]
+        if len(candidates) != 1:
+            return None, (
+                "Cannot infer which column to filter on "
+                f"({len(candidates)} datetime column(s) found). "
+                "Pass --date-column."
+            )
+        column = candidates[0]
+    elif column not in data.columns:
+        return None, f"Column '{column}' not found in dataset."
+
+    parsed = pd.to_datetime(data[column], errors="coerce")
+    if parsed.isna().all():
+        return None, f"Column '{column}' holds no parseable dates."
+
+    mask = pd.Series(True, index=data.index)
+    for bound, comparison in ((args.from_date, "ge"), (args.to_date, "le")):
+        if not bound:
+            continue
+        try:
+            edge = pd.Timestamp(bound)
+        except ValueError:
+            return None, f"Cannot parse date '{bound}'; expected YYYY-MM-DD."
+        mask &= getattr(parsed, comparison)(edge)
+
+    # Rows whose date failed to parse cannot be placed in the range.
+    mask &= parsed.notna()
+    return data[mask], None
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     """Handle the audit subcommand."""
     auditor = DatasetAuditor(
@@ -280,20 +338,37 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if select_columns or exclude_columns:
+    date_filtered = bool(args.from_date or args.to_date)
+    if select_columns or exclude_columns or date_filtered:
         data = _load(args)
+        if date_filtered:
+            before = len(data)
+            data, error = _apply_date_filter(data, args)
+            if error:
+                print(f"Error: {error}", file=sys.stderr)
+                return 2
+            if data.empty:
+                print("Error: no rows fall within the requested date range.", file=sys.stderr)
+                return 2
+            print(
+                f"Date filter kept {len(data)} of {before} row(s).",
+                file=sys.stderr,
+            )
+        present: list[str] = []
+        missing: list[str] = []
         if select_columns:
             present = [c for c in select_columns if c in data.columns]
             missing = [c for c in select_columns if c not in data.columns]
-        else:
+        elif exclude_columns:
             missing = [c for c in exclude_columns if c not in data.columns]
             present = [c for c in data.columns if c not in set(exclude_columns)]
         if missing:
             print(f"Warning: requested columns not found in dataset: {missing}", file=sys.stderr)
-        if not present:
-            print("Error: no columns left to audit after filtering.", file=sys.stderr)
-            return 2
-        data = data[present]
+        if select_columns or exclude_columns:
+            if not present:
+                print("Error: no columns left to audit after filtering.", file=sys.stderr)
+                return 2
+            data = data[present]
         reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
         report = auditor.audit_dataframe(
             data,
