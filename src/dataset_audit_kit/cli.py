@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    missing_parser = subparsers.add_parser("missing", help="Report missing values per column")
+    missing_parser.add_argument("data", help="Path to the dataset")
+    missing_parser.add_argument("--threshold", type=float, default=0.0, help="Only show columns missing more than this fraction (default: 0.0)")
+    missing_parser.add_argument("--all", action="store_true", help="Include columns with no missing values")
+
     describe_parser = subparsers.add_parser("describe", help="Show summary statistics for every column")
     describe_parser.add_argument("data", help="Path to the dataset")
     describe_parser.add_argument("--include", choices=["numeric", "categorical", "all"], default="all", help="Which columns to describe (default: all)")
@@ -374,6 +379,43 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_missing(args: argparse.Namespace) -> int:
+    """Handle the missing subcommand."""
+    data = DatasetAuditor.load_dataframe(args.data)
+    rows = len(data)
+    if rows == 0:
+        print("Dataset has no rows.")
+        return 0
+
+    counts = data.isna().sum().sort_values(ascending=False)
+    total_missing = int(counts.sum())
+
+    print(f"{'Column':<30}{'Missing':>10}{'Percent':>10}")
+    print("-" * 50)
+    shown = 0
+    for column, count in counts.items():
+        count = int(count)
+        ratio = count / rows
+        if not args.all and (count == 0 or ratio <= args.threshold):
+            continue
+        print(f"{str(column)[:29]:<30}{count:>10}{ratio:>9.1%}")
+        shown += 1
+
+    if shown == 0:
+        print("(no columns above the threshold)")
+
+    print("-" * 50)
+    cells = rows * len(data.columns)
+    overall = total_missing / cells if cells else 0.0
+    print(f"{'TOTAL':<30}{total_missing:>10}{overall:>9.1%}")
+    print()
+    print(
+        f"{rows} rows x {len(data.columns)} columns; "
+        f"{int((data.isna().any(axis=1)).sum())} row(s) have at least one missing value."
+    )
+    return 0
+
+
 def _cmd_describe(args: argparse.Namespace) -> int:
     """Handle the describe subcommand."""
     data = DatasetAuditor.load_dataframe(args.data)
@@ -456,5 +498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_hist(args)
     elif args.command == "describe":
         return _cmd_describe(args)
+    elif args.command == "missing":
+        return _cmd_missing(args)
     else:
         parser.error("unsupported command")
