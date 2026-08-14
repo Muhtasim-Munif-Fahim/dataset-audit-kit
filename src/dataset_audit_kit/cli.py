@@ -178,18 +178,32 @@ def build_parser() -> argparse.ArgumentParser:
     hist_parser.add_argument("--column", required=True, help="Numeric column name")
     hist_parser.add_argument("--bins", type=int, default=10, help="Number of bins")
 
+    # Every subcommand reads a dataset, so the flag belongs on all of them.
+    for subparser in subparsers.choices.values():
+        subparser.add_argument(
+            "--encoding",
+            default=None,
+            help="Text encoding of the input file (e.g. latin-1, cp1252). "
+                 "Ignored for .parquet and Excel inputs.",
+        )
+
     return parser
 
 
+def _load(args: argparse.Namespace) -> "pd.DataFrame":
+    """Load the dataset named by args, honouring --encoding when given."""
+    return DatasetAuditor.load_dataframe(args.data, encoding=getattr(args, "encoding", None))
+
+
 def _cmd_head(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     print(data.head(args.rows).to_csv(index=False))
     return 0
 
 
 def _cmd_columns(args: argparse.Namespace) -> int:
     """Handle the columns subcommand."""
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     cols = list(data.columns)
     if args.sort == "name":
         cols.sort()
@@ -230,7 +244,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         return 2
     if select_columns or exclude_columns:
-        data = DatasetAuditor.load_dataframe(args.data)
+        data = _load(args)
         if select_columns:
             present = [c for c in select_columns if c in data.columns]
             missing = [c for c in select_columns if c not in data.columns]
@@ -330,7 +344,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 
 def _cmd_info(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     mem = data.memory_usage(deep=True).sum() / 1024 / 1024
     print(f"Shape:  {data.shape[0]} rows x {data.shape[1]} columns")
     print(f"Memory: {mem:.2f} MB")
@@ -342,13 +356,13 @@ def _cmd_info(args: argparse.Namespace) -> int:
 
 def _cmd_tail(args: argparse.Namespace) -> int:
     import pandas as pd
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     print(data.tail(args.rows).to_csv(index=False))
     return 0
 
 
 def _cmd_unique(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     if args.column not in data.columns:
         print(f"Column '{args.column}' not found.", file=sys.stderr)
         return 1
@@ -361,7 +375,7 @@ def _cmd_unique(args: argparse.Namespace) -> int:
 
 
 def _cmd_dtype(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     suggested = DatasetAuditor.infer_optimal_dtypes(data)
     print(f"{'Column':<30} {'Current':<15} {'Suggested':<15}")
     print("-" * 60)
@@ -373,7 +387,7 @@ def _cmd_dtype(args: argparse.Namespace) -> int:
 
 
 def _cmd_shape(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     if getattr(args, "csv", False):
         print(f"{data.shape[0]},{data.shape[1]}")
     else:
@@ -383,7 +397,7 @@ def _cmd_shape(args: argparse.Namespace) -> int:
 
 def _cmd_hist(args: argparse.Namespace) -> int:
     import pandas as pd
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     if args.column not in data.columns:
         print(f"Column '{args.column}' not found.", file=sys.stderr)
         return 1
@@ -403,7 +417,7 @@ def _cmd_hist(args: argparse.Namespace) -> int:
 
 
 def _cmd_correlate(args: argparse.Namespace) -> int:
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     numeric = data.select_dtypes(include="number")
     if numeric.empty:
         print("No numeric columns found.", file=sys.stderr)
@@ -432,7 +446,7 @@ def _cmd_rename(args: argparse.Namespace) -> int:
         print(f"Refusing to overwrite existing file '{output}'; pass --force.", file=sys.stderr)
         return 2
 
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
 
     unknown = [old for old in mapping if old not in data.columns]
     if unknown:
@@ -466,7 +480,7 @@ def _cmd_rename(args: argparse.Namespace) -> int:
 
 def _cmd_profile(args: argparse.Namespace) -> int:
     """Handle the profile subcommand."""
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     if args.column not in data.columns:
         available = ", ".join(map(str, list(data.columns)[:10]))
         print(f"Column '{args.column}' not found. Available: {available}", file=sys.stderr)
@@ -520,7 +534,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 
 def _cmd_stats(args: argparse.Namespace) -> int:
     """Handle the stats subcommand."""
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     rows, cols = data.shape
     cells = rows * cols
 
@@ -566,7 +580,7 @@ def _human_bytes(size: int) -> str:
 
 def _cmd_missing(args: argparse.Namespace) -> int:
     """Handle the missing subcommand."""
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
     rows = len(data)
     if rows == 0:
         print("Dataset has no rows.")
@@ -603,7 +617,7 @@ def _cmd_missing(args: argparse.Namespace) -> int:
 
 def _cmd_describe(args: argparse.Namespace) -> int:
     """Handle the describe subcommand."""
-    data = DatasetAuditor.load_dataframe(args.data)
+    data = _load(args)
 
     numeric = data.select_dtypes(include="number")
     categorical = data.select_dtypes(exclude="number")

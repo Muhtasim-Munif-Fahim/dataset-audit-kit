@@ -626,23 +626,26 @@ class DatasetAuditor:
         )
 
     @staticmethod
-    def load_dataframe(path: str | Path) -> pd.DataFrame:
+    def load_dataframe(path: str | Path, encoding: str | None = None) -> pd.DataFrame:
         """Load a tabular dataset from CSV, TSV, JSONL/NDJSON, Parquet, or Excel.
 
         Text formats may additionally carry a compression suffix, for example
         ``.csv.gz``. pandas infers the codec from the filename, so the suffix is
         only stripped here to work out which reader to dispatch to.
+
+        ``encoding`` applies to the text formats only; Parquet and Excel carry
+        their own encoding information and ignore it.
         """
 
         dataset_path = Path(path)
         suffix = DatasetAuditor._data_suffix(dataset_path)
 
         if suffix == ".csv":
-            return pd.read_csv(dataset_path)
+            return pd.read_csv(dataset_path, encoding=encoding)
         if suffix == ".tsv":
             return pd.read_csv(dataset_path, sep="\t")
         if suffix in {".jsonl", ".ndjson"}:
-            return pd.read_json(dataset_path, lines=True)
+            return pd.read_json(dataset_path, lines=True, encoding=encoding)
         if suffix == ".parquet":
             return pd.read_parquet(dataset_path)
         if suffix in {".xlsx", ".xls"}:
