@@ -160,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
+    diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
+    diff_parser.add_argument("current", help="Path to the later report")
+    diff_parser.add_argument("--fail-on-regression", action="store_true", help="Exit 1 if quality dropped or issues were added")
+
     schema_parser = subparsers.add_parser("schema", help="Export the dataset schema as JSON Schema")
     schema_parser.add_argument("data", help="Path to the dataset")
     schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
@@ -500,6 +505,87 @@ _JSON_SCHEMA_TYPES: dict[str, tuple[str, str | None]] = {
     "S": ("string", None),
     "U": ("string", None),
 }
+
+
+def _cmd_diff(args: argparse.Namespace) -> int:
+    """Handle the diff subcommand."""
+    import json
+
+    reports = {}
+    for label, path in (("baseline", args.baseline), ("current", args.current)):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                reports[label] = json.load(handle)
+        except OSError as exc:
+            print(f"Cannot read {label} report '{path}': {exc}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as exc:
+            print(
+                f"{label.capitalize()} report '{path}' is not valid JSON: {exc}. "
+                "Reports come from `audit --save-json`.",
+                file=sys.stderr,
+            )
+            return 2
+
+    before, after = reports["baseline"], reports["current"]
+
+    def _num(report: dict, key: str) -> float:
+        value = report.get(key, 0)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    print(f"{'Metric':<20}{'baseline':>12}{'current':>12}{'change':>12}")
+    print("-" * 56)
+    regressed = False
+    for key in ("quality_score", "rows", "columns", "duplicate_rows", "missing_cells"):
+        old, new = _num(before, key), _num(after, key)
+        delta = new - old
+        # Higher is better for quality_score; for the rest, higher is worse.
+        if key == "quality_score":
+            worse = delta < 0
+        else:
+            worse = delta > 0 and key in {"duplicate_rows", "missing_cells"}
+        regressed = regressed or worse
+        marker = "  <-- worse" if worse else ""
+        print(f"{key:<20}{old:>12.0f}{new:>12.0f}{delta:>+12.0f}{marker}")
+
+    old_issues = {_issue_key(i) for i in before.get("issues", [])}
+    new_issues = {_issue_key(i) for i in after.get("issues", [])}
+
+    added = sorted(new_issues - old_issues)
+    resolved = sorted(old_issues - new_issues)
+    regressed = regressed or bool(added)
+
+    print()
+    print(f"Issues: {len(old_issues)} -> {len(new_issues)} "
+          f"({len(added)} added, {len(resolved)} resolved)")
+    for key in added:
+        print(f"  + {key}")
+    for key in resolved:
+        print(f"  - {key}")
+
+    before_columns = set(before.get("column_profiles", {}))
+    after_columns = set(after.get("column_profiles", {}))
+    dropped, gained = sorted(before_columns - after_columns), sorted(after_columns - before_columns)
+    if dropped or gained:
+        print()
+        print("Schema changes:")
+        for column in dropped:
+            print(f"  - {column} (dropped)")
+        for column in gained:
+            print(f"  + {column} (new)")
+        regressed = regressed or bool(dropped)
+
+    if args.fail_on_regression and regressed:
+        return 1
+    return 0
+
+
+def _issue_key(issue: dict) -> str:
+    """Identify an issue by what it is about, not by its wording."""
+    check = issue.get("check", "?")
+    column = issue.get("column")
+    severity = issue.get("severity", "?")
+    return f"[{severity}] {check}" + (f" on '{column}'" if column else "")
 
 
 def _cmd_schema(args: argparse.Namespace) -> int:
@@ -845,5 +931,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_rename(args)
     elif args.command == "schema":
         return _cmd_schema(args)
+    elif args.command == "diff":
+        return _cmd_diff(args)
     else:
         parser.error("unsupported command")
