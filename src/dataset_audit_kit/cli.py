@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print fix suggestions for each issue",
     )
     audit.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Print only the status line and issue count",
+    )
+    audit.add_argument(
         "--save-json",
         help="Write JSON report to the specified path",
         default=None,
@@ -107,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Print only the status line and issue count",
     )
     check.add_argument(
         "--save-json",
@@ -150,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape_parser.add_argument("data", help="Path to the dataset")
     shape_parser.add_argument("--csv", action="store_true", help="CSV output (rows,columns)")
 
+    schema_parser = subparsers.add_parser("schema", help="Export the dataset schema as JSON Schema")
+    schema_parser.add_argument("data", help="Path to the dataset")
+    schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
+    schema_parser.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
+
     rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
     rename_parser.add_argument("data", help="Path to the dataset")
     rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
@@ -186,13 +201,30 @@ def build_parser() -> argparse.ArgumentParser:
             help="Text encoding of the input file (e.g. latin-1, cp1252). "
                  "Ignored for .parquet and Excel inputs.",
         )
+        # `rename` already defines --output as its destination file.
+        if "output" not in {action.dest for action in subparser._actions}:
+            subparser.add_argument(
+                "--output", "-o",
+                default=None,
+                help="Write this command's output to a file instead of stdout.",
+            )
+        subparser.add_argument(
+            "--delimiter",
+            default=None,
+            help="Field separator for delimited text. Defaults to the "
+                 "convention for .csv/.tsv and is sniffed for .txt.",
+        )
 
     return parser
 
 
 def _load(args: argparse.Namespace) -> "pd.DataFrame":
     """Load the dataset named by args, honouring --encoding when given."""
-    return DatasetAuditor.load_dataframe(args.data, encoding=getattr(args, "encoding", None))
+    return DatasetAuditor.load_dataframe(
+        args.data,
+        encoding=getattr(args, "encoding", None),
+        delimiter=getattr(args, "delimiter", None),
+    )
 
 
 def _cmd_head(args: argparse.Namespace) -> int:
@@ -278,7 +310,11 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         html_path = Path(args.html_out)
         html_path.write_text(report.to_html(), encoding="utf-8")
 
-    if args.json:
+    if args.minimal:
+        errors = sum(1 for issue in report.issues if issue.severity == "error")
+        status = "PASS" if not report.issues else "FAIL"
+        print(f"[{status}] {len(report.issues)} issue(s), {errors} error(s).")
+    elif args.json:
         print(report.to_json())
     else:
         print(report.to_markdown())
@@ -327,19 +363,25 @@ def _cmd_check(args: argparse.Namespace) -> int:
     )
 
     if report.issues:
-        print(report.to_markdown())
+        if not args.minimal:
+            print(report.to_markdown())
         if args.save_json:
             report.to_file(args.save_json)
         if args.save_markdown:
             report.to_file(args.save_markdown)
-        print(f"\n[FAIL] Found {len(report.issues)} issue(s) - check failed.", flush=True)
+        errors = sum(1 for issue in report.issues if issue.severity == "error")
+        summary = f"[FAIL] {len(report.issues)} issue(s), {errors} error(s) - check failed."
+        print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
     if args.save_json:
         report.to_file(args.save_json)
     if args.save_markdown:
         report.to_file(args.save_markdown)
-    print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
+    if args.minimal:
+        print("[PASS] 0 issue(s).")
+    else:
+        print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
     return 0
 
 
@@ -408,12 +450,31 @@ def _cmd_hist(args: argparse.Namespace) -> int:
     counts, edges = np.histogram(col, bins=args.bins)
     max_count = max(counts) if len(counts) > 0 else 1
     bar_width = 40
+    block, divider = _bar_glyphs()
     print(f"Histogram for '{args.column}' ({len(col)} values, {args.bins} bins):")
     for i in range(len(counts)):
         pct = counts[i] / max_count
-        bar = "█" * int(pct * bar_width)
-        print(f"{edges[i]:>8.2f}-{edges[i+1]:<8.2f} │{bar} {counts[i]}")
+        bar = block * int(pct * bar_width)
+        print(f"{edges[i]:>8.2f}-{edges[i+1]:<8.2f} {divider}{bar} {counts[i]}")
     return 0
+
+
+def _bar_glyphs() -> tuple[str, str]:
+    """Return (bar, divider) glyphs the current stdout can actually encode.
+
+    The Windows console defaults to cp1252, which cannot encode the block and
+    box-drawing characters, so printing them raised UnicodeEncodeError and the
+    histogram died halfway through its header.
+    """
+
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    for candidate in (("█", "│"), ("#", "|")):
+        try:
+            "".join(candidate).encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            continue
+        return candidate
+    return ("#", "|")
 
 
 def _cmd_correlate(args: argparse.Namespace) -> int:
@@ -424,6 +485,66 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
         return 1
     corr = numeric.corr(method=args.method)
     print(corr.to_csv(float_format="%.4f"))
+    return 0
+
+
+#: pandas dtype kind -> (JSON Schema type, optional format)
+_JSON_SCHEMA_TYPES: dict[str, tuple[str, str | None]] = {
+    "b": ("boolean", None),
+    "i": ("integer", None),
+    "u": ("integer", None),
+    "f": ("number", None),
+    "M": ("string", "date-time"),
+    "m": ("string", "duration"),
+    "O": ("string", None),
+    "S": ("string", None),
+    "U": ("string", None),
+}
+
+
+def _cmd_schema(args: argparse.Namespace) -> int:
+    """Handle the schema subcommand."""
+    import json
+
+    data = _load(args)
+
+    properties: dict[str, dict[str, object]] = {}
+    required: list[str] = []
+
+    for column in data.columns:
+        series = data[column]
+        json_type, json_format = _JSON_SCHEMA_TYPES.get(series.dtype.kind, ("string", None))
+
+        has_missing = bool(series.isna().any())
+        # A column with gaps must admit null; one without becomes required.
+        entry: dict[str, object] = {
+            "type": [json_type, "null"] if has_missing else json_type
+        }
+        if json_format:
+            entry["format"] = json_format
+        if not has_missing:
+            required.append(str(column))
+
+        # Enumerate genuinely low-cardinality string columns; anything wider is
+        # data rather than a closed set.
+        if json_type == "string" and json_format is None:
+            values = series.dropna().unique()
+            if 0 < len(values) <= 20 and len(values) < len(series):
+                entry["enum"] = sorted(str(value) for value in values)
+
+        properties[str(column)] = entry
+
+    schema: dict[str, object] = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": args.title or Path(args.data).stem,
+        "description": f"Schema inferred from {Path(args.data).name} ({len(data)} rows).",
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        schema["required"] = required
+
+    print(json.dumps(schema, indent=args.indent, sort_keys=False))
     return 0
 
 
@@ -668,6 +789,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # `rename` takes --output as its destination file, so it is not a redirect.
+    redirect = getattr(args, "output", None) if args.command != "rename" else None
+    if redirect:
+        import contextlib
+
+        try:
+            handle = open(redirect, "w", encoding="utf-8", newline="")
+        except OSError as exc:
+            print(f"Cannot write to '{redirect}': {exc}", file=sys.stderr)
+            return 2
+        with handle, contextlib.redirect_stdout(handle):
+            return _dispatch(args, parser)
+    return _dispatch(args, parser)
+
+
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+
     if getattr(args, "version", False):
         from . import __version__
         print(f"dataset-audit-kit v{__version__} (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
@@ -705,5 +843,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_profile(args)
     elif args.command == "rename":
         return _cmd_rename(args)
+    elif args.command == "schema":
+        return _cmd_schema(args)
     else:
         parser.error("unsupported command")
