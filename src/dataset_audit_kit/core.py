@@ -195,7 +195,16 @@ class AuditReport:
 
     @property
     def status(self) -> str:
-        return "pass" if not self.issues else "warn"
+        # `info` findings (a new column, an outlier note) describe the dataset
+        # rather than fault it, so they must not turn the status — and with it
+        # the CLI exit code — into a failure.
+        return "warn" if self.blocking_issues else "pass"
+
+    @property
+    def blocking_issues(self) -> list[AuditIssue]:
+        """Issues that count against the dataset: errors and warnings."""
+
+        return [issue for issue in self.issues if issue.severity in {"error", "warning"}]
 
     @property
     def quality_score(self) -> int:

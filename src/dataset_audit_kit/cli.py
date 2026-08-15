@@ -471,9 +471,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         html_path.write_text(report.to_html(), encoding="utf-8")
 
     if args.minimal:
-        errors = sum(1 for issue in report.issues if issue.severity == "error")
-        status = "PASS" if not report.issues else "FAIL"
-        print(f"[{status}] {len(report.issues)} issue(s), {errors} error(s).")
+        blocking = report.blocking_issues
+        errors = sum(1 for issue in blocking if issue.severity == "error")
+        status = "PASS" if report.status == "pass" else "FAIL"
+        print(f"[{status}] {len(blocking)} issue(s), {errors} error(s).")
     elif args.json:
         print(report.to_json())
     else:
@@ -525,15 +526,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
         delimiter=getattr(args, "delimiter", None),
     )
 
-    if report.issues:
+    blocking = report.blocking_issues
+    if blocking:
         if not args.minimal:
             print(report.to_markdown())
         if args.save_json:
             report.to_file(args.save_json)
         if args.save_markdown:
             report.to_file(args.save_markdown)
-        errors = sum(1 for issue in report.issues if issue.severity == "error")
-        summary = f"[FAIL] {len(report.issues)} issue(s), {errors} error(s) - check failed."
+        errors = sum(1 for issue in blocking if issue.severity == "error")
+        summary = f"[FAIL] {len(blocking)} issue(s), {errors} error(s) - check failed."
         print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
