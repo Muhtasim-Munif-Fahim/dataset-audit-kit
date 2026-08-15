@@ -409,14 +409,17 @@ class AuditReport:
                     f"<tr><td>Unique</td><td>{profile.get('unique', '?')}</td></tr>"
                 )
                 if dtype == "numeric":
+                    # A column that is entirely missing has no statistics at
+                    # all, so every value goes through _format_stat rather than
+                    # a bare float format that would raise on the placeholder.
                     profile_sections.extend([
-                        f"<tr><td>Min</td><td>{profile.get('min', '?')}</td></tr>",
-                        f"<tr><td>Max</td><td>{profile.get('max', '?')}</td></tr>",
-                        f"<tr><td>Mean</td><td>{profile.get('mean', '?'):.3f}</td></tr>",
-                        f"<tr><td>Std</td><td>{profile.get('std', '?'):.3f}</td></tr>",
-                        f"<tr><td>Q1</td><td>{profile.get('q25', '?')}</td></tr>",
-                        f"<tr><td>Q2 (median)</td><td>{profile.get('q50', '?')}</td></tr>",
-                        f"<tr><td>Q3</td><td>{profile.get('q75', '?')}</td></tr>",
+                        f"<tr><td>Min</td><td>{esc(_format_stat(profile.get('min')))}</td></tr>",
+                        f"<tr><td>Max</td><td>{esc(_format_stat(profile.get('max')))}</td></tr>",
+                        f"<tr><td>Mean</td><td>{esc(_format_stat(profile.get('mean')))}</td></tr>",
+                        f"<tr><td>Std</td><td>{esc(_format_stat(profile.get('std')))}</td></tr>",
+                        f"<tr><td>Q1</td><td>{esc(_format_stat(profile.get('q25')))}</td></tr>",
+                        f"<tr><td>Q2 (median)</td><td>{esc(_format_stat(profile.get('q50')))}</td></tr>",
+                        f"<tr><td>Q3</td><td>{esc(_format_stat(profile.get('q75')))}</td></tr>",
                     ])
                 elif dtype == "categorical":
                     top_val = profile.get("top", "?")
