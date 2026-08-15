@@ -910,8 +910,25 @@ class DatasetAuditor:
         """
 
         seen: dict[str, str] = {}
+        exact_seen: set[str] = set()
         for column in data.columns:
             name = str(column)
+
+            if name in exact_seen:
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="error",
+                        message=(
+                            "Duplicate column name: selecting it returns a frame "
+                            "rather than a series, which breaks most downstream code."
+                        ),
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+                continue
+            exact_seen.add(name)
 
             if name != name.strip():
                 issues.append(
