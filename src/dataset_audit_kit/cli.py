@@ -654,8 +654,15 @@ def _cmd_hist(args: argparse.Namespace) -> int:
     if not pd.api.types.is_numeric_dtype(col):
         print(f"Column '{args.column}' is not numeric.", file=sys.stderr)
         return 1
+    if args.bins < 1:
+        print(f"--bins must be at least 1 (got {args.bins}).", file=sys.stderr)
+        return 2
+    if col.empty:
+        print(f"Column '{args.column}' has no non-missing values to plot.", file=sys.stderr)
+        return 1
     counts, edges = np.histogram(col, bins=args.bins)
-    max_count = max(counts) if len(counts) > 0 else 1
+    max_count = int(counts.max()) if len(counts) else 0
+    max_count = max_count or 1
     bar_width = 40
     block, divider = _bar_glyphs()
     print(f"Histogram for '{args.column}' ({len(col)} values, {args.bins} bins):")
