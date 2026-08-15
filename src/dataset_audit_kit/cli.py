@@ -474,8 +474,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         print(message, file=sys.stderr if machine_readable else sys.stdout)
 
     if args.html_out:
-        html_path = Path(args.html_out)
-        html_path.write_text(report.to_html(), encoding="utf-8")
+        try:
+            html_path = Path(args.html_out)
+            if html_path.parent != Path(""):
+                html_path.parent.mkdir(parents=True, exist_ok=True)
+            html_path.write_text(report.to_html(), encoding="utf-8")
+        except OSError as exc:
+            print(f"Cannot write HTML report to '{args.html_out}': {exc}", file=sys.stderr)
+            return 2
 
     if args.minimal:
         blocking = report.blocking_issues
@@ -509,15 +515,36 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             print()
             print("_No fix suggestions -- dataset is clean._")
 
-    if args.save_json:
-        saved = report.to_file(args.save_json)
-        notice(f"JSON report saved to {saved}")
-
-    if args.save_markdown:
-        saved = report.to_file(args.save_markdown)
-        notice(f"Markdown report saved to {saved}")
+    for path, content, label in (
+        (args.save_json, report.to_json(), "JSON"),
+        (args.save_markdown, report.to_markdown(), "Markdown"),
+    ):
+        if not path:
+            continue
+        error = _write_text(path, content)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+        notice(f"{label} report saved to {path}")
 
     return 0 if report.status == "pass" else 1
+
+
+def _write_text(path: str, content: str) -> str | None:
+    """Write text to a path, creating parent directories.
+
+    Returns an error message instead of raising, so a bad destination ends in a
+    one-line diagnostic rather than a traceback.
+    """
+
+    destination = Path(path)
+    try:
+        if destination.parent != Path(""):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"Cannot write report to '{path}': {exc}"
+    return None
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -538,23 +565,26 @@ def _cmd_check(args: argparse.Namespace) -> int:
         delimiter=getattr(args, "delimiter", None),
     )
 
+    for path, content in (
+        (args.save_json, report.to_json()),
+        (args.save_markdown, report.to_markdown()),
+    ):
+        if not path:
+            continue
+        error = _write_text(path, content)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+
     blocking = report.blocking_issues
     if blocking:
         if not args.minimal:
             print(report.to_markdown())
-        if args.save_json:
-            report.to_file(args.save_json)
-        if args.save_markdown:
-            report.to_file(args.save_markdown)
         errors = sum(1 for issue in blocking if issue.severity == "error")
         summary = f"[FAIL] {len(blocking)} issue(s), {errors} error(s) - check failed."
         print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
-    if args.save_json:
-        report.to_file(args.save_json)
-    if args.save_markdown:
-        report.to_file(args.save_markdown)
     if args.minimal:
         print("[PASS] 0 issue(s).")
     else:

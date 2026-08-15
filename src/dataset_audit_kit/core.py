@@ -578,6 +578,10 @@ class AuditReport:
                 "Supported formats are .json, .md, .html."
             )
 
+        # `--save-json reports/today.json` should not fail because `reports/`
+        # does not exist yet; the caller named a destination, not a directory.
+        if path_obj.parent != Path(""):
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
         path_obj.write_text(content, encoding="utf-8")
         return path
 
