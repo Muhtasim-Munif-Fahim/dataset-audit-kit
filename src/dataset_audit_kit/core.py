@@ -1057,9 +1057,14 @@ class DatasetAuditor:
         label_column: str,
         issues: list[AuditIssue],
     ) -> dict[str, int]:
-        counts = data[label_column].fillna("<missing>").astype(str).value_counts()
+        labels = data[label_column]
+        # Going through object first: filling a Categorical with a value that is
+        # not one of its categories raises, so a categorical label column used
+        # to crash the whole audit here.
+        filled = labels.astype(object).where(labels.notna(), "<missing>").astype(str)
+        counts = filled.value_counts()
         total = int(counts.sum()) or 1
-        missing_count = int(data[label_column].isna().sum())
+        missing_count = int(labels.isna().sum())
         if missing_count:
             issues.append(
                 AuditIssue(
