@@ -723,12 +723,16 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        encoding: str | None = None,
+        delimiter: str | None = None,
     ) -> AuditReport:
         return self.audit_file(
             data_path,
             reference_path=reference_path,
             label_column=label_column,
             expected_columns=expected_columns,
+            encoding=encoding,
+            delimiter=delimiter,
         )
 
     def audit_file(
@@ -739,9 +743,22 @@ class DatasetAuditor:
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
         unique_columns: Sequence[str] | None = None,
+        encoding: str | None = None,
+        delimiter: str | None = None,
     ) -> AuditReport:
-        data = self.load_dataframe(data_path)
-        reference = self.load_dataframe(reference_path) if reference_path else None
+        """Audit a dataset on disk.
+
+        ``encoding`` and ``delimiter`` are handed to the reader for both the
+        dataset and the reference, so a latin-1 or semicolon-separated pair
+        loads the same way through the file API as through ``load_dataframe``.
+        """
+
+        data = self.load_dataframe(data_path, encoding=encoding, delimiter=delimiter)
+        reference = (
+            self.load_dataframe(reference_path, encoding=encoding, delimiter=delimiter)
+            if reference_path
+            else None
+        )
         return self.audit_dataframe(
             data,
             reference=reference,

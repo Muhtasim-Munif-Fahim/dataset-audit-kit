@@ -439,7 +439,15 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 print("Error: no columns left to audit after filtering.", file=sys.stderr)
                 return 2
             data = data[present]
-        reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
+        reference = (
+            DatasetAuditor.load_dataframe(
+                args.reference,
+                encoding=getattr(args, "encoding", None),
+                delimiter=getattr(args, "delimiter", None),
+            )
+            if args.reference
+            else None
+        )
         report = auditor.audit_dataframe(
             data,
             reference=reference,
@@ -454,6 +462,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             label_column=args.label_column,
             expected_columns=_parse_columns(args.expected_columns),
             unique_columns=_parse_columns(args.unique_columns),
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
         )
 
     if args.html_out:
@@ -511,6 +521,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         label_column=None,
         expected_columns=None,
         unique_columns=None,
+        encoding=getattr(args, "encoding", None),
+        delimiter=getattr(args, "delimiter", None),
     )
 
     if report.issues:
