@@ -466,6 +466,13 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             delimiter=getattr(args, "delimiter", None),
         )
 
+    # With --json or --minimal the output is meant to be consumed by another
+    # program, so progress notes go to stderr and leave stdout parseable.
+    machine_readable = bool(args.json or args.minimal)
+
+    def notice(message: str) -> None:
+        print(message, file=sys.stderr if machine_readable else sys.stdout)
+
     if args.html_out:
         html_path = Path(args.html_out)
         html_path.write_text(report.to_html(), encoding="utf-8")
@@ -476,14 +483,19 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         status = "PASS" if report.status == "pass" else "FAIL"
         print(f"[{status}] {len(blocking)} issue(s), {errors} error(s).")
     elif args.json:
-        print(report.to_json())
+        import json
+
+        payload = report.to_dict()
+        if args.fix_suggestions:
+            payload["fix_suggestions"] = report.fix_suggestions
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(report.to_markdown())
 
     if args.html_out:
-        print(f"HTML report written to {args.html_out}")
+        notice(f"HTML report written to {args.html_out}")
 
-    if args.fix_suggestions:
+    if args.fix_suggestions and not args.json:
         suggestions = report.fix_suggestions
         if suggestions:
             print()
@@ -499,11 +511,11 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     if args.save_json:
         saved = report.to_file(args.save_json)
-        print(f"JSON report saved to {saved}")
+        notice(f"JSON report saved to {saved}")
 
     if args.save_markdown:
         saved = report.to_file(args.save_markdown)
-        print(f"Markdown report saved to {saved}")
+        notice(f"Markdown report saved to {saved}")
 
     return 0 if report.status == "pass" else 1
 
