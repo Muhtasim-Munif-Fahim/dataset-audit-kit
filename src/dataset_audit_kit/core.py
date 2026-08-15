@@ -1063,7 +1063,6 @@ class DatasetAuditor:
         # to crash the whole audit here.
         filled = labels.astype(object).where(labels.notna(), "<missing>").astype(str)
         counts = filled.value_counts()
-        total = int(counts.sum()) or 1
         missing_count = int(labels.isna().sum())
         if missing_count:
             issues.append(
@@ -1076,7 +1075,12 @@ class DatasetAuditor:
                 )
             )
 
-        if counts.empty:
+        # Balance is a property of the labels that exist; the `<missing>` bucket
+        # is reported separately above and must not be mistaken for a class.
+        real_counts = counts.drop(labels="<missing>", errors="ignore")
+        real_total = int(real_counts.sum()) or 1
+
+        if real_counts.empty:
             issues.append(
                 AuditIssue(
                     check="labels",
@@ -1086,18 +1090,18 @@ class DatasetAuditor:
                     observed=0,
                 )
             )
-        elif counts.size < 2:
+        elif real_counts.size < 2:
             issues.append(
                 AuditIssue(
                     check="labels",
                     severity="warning",
                     message="Only one label value is present.",
                     column=label_column,
-                    observed=int(counts.iloc[0]),
+                    observed=int(real_counts.iloc[0]),
                 )
             )
         else:
-            minority_share = counts.min() / total
+            minority_share = real_counts.min() / real_total
             if minority_share < self.label_min_share:
                 issues.append(
                     AuditIssue(
