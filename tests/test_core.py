@@ -1,0 +1,176 @@
+"""Tests for the auditing core."""
+
+from __future__ import annotations
+
+import warnings
+
+import pandas as pd
+import pytest
+
+from dataset_audit_kit.core import AuditIssue, AuditReport, DatasetAuditor
+
+
+def _messages(report: AuditReport, check: str) -> list[str]:
+    return [issue.message for issue in report.issues if issue.check == check]
+
+
+class TestStatus:
+    def test_info_only_issues_still_pass(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.append(
+            AuditIssue(check="schema_diff", severity="info", message="Column 'b' added.")
+        )
+        assert report.status == "pass"
+        assert report.blocking_issues == []
+
+    @pytest.mark.parametrize("severity", ["warning", "error"])
+    def test_warnings_and_errors_fail(self, severity: str) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.append(AuditIssue(check="duplicates", severity=severity, message="x"))
+        assert report.status == "warn"
+        assert len(report.blocking_issues) == 1
+
+
+class TestUniqueness:
+    def test_counts_every_redundant_row(self) -> None:
+        # One value repeated three times leaves two redundant rows, and a value
+        # repeated twice leaves one: three in total across two repeated values.
+        data = pd.DataFrame({"id": [1, 1, 1, 2, 2, 3]})
+        report = DatasetAuditor().audit_dataframe(data, unique_columns=["id"])
+        message = _messages(report, "uniqueness")[0]
+        assert "3 duplicate row(s)" in message
+        assert "2 repeated value(s)" in message
+
+    def test_unique_column_is_silent(self) -> None:
+        data = pd.DataFrame({"id": [1, 2, 3]})
+        report = DatasetAuditor().audit_dataframe(data, unique_columns=["id"])
+        assert _messages(report, "uniqueness") == []
+
+    def test_missing_column_is_an_error(self) -> None:
+        report = DatasetAuditor().audit_dataframe(
+            pd.DataFrame({"id": [1]}), unique_columns=["nope"]
+        )
+        assert "not found" in _messages(report, "uniqueness")[0]
+
+
+class TestColumnNames:
+    def test_exact_duplicate_names_are_flagged(self) -> None:
+        data = pd.DataFrame([[1, 2, 3]], columns=["a", "a", "b"])
+        report = DatasetAuditor().audit_dataframe(data)
+        assert any("Duplicate column name" in m for m in _messages(report, "column_names"))
+
+    def test_duplicate_names_do_not_break_profiling(self) -> None:
+        data = pd.DataFrame([[1, 2, "x"], [3, 4, "y"]], columns=["a", "a", "b"])
+        report = DatasetAuditor().audit_dataframe(data)
+        assert report.to_markdown()
+        assert report.to_html()
+
+    def test_case_only_difference_is_flagged(self) -> None:
+        data = pd.DataFrame([[1, 2]], columns=["Age", "age"])
+        report = DatasetAuditor().audit_dataframe(data)
+        assert any("only by case" in m for m in _messages(report, "column_names"))
+
+    def test_clean_names_are_silent(self, clean_frame: pd.DataFrame) -> None:
+        report = DatasetAuditor().audit_dataframe(clean_frame)
+        assert _messages(report, "column_names") == []
+
+
+class TestLabelBalance:
+    def test_categorical_label_column_does_not_crash(self) -> None:
+        data = pd.DataFrame({"y": pd.Categorical(["a", "b", None])})
+        report = DatasetAuditor().audit_dataframe(data, label_column="y")
+        assert report.label_distribution == {"a": 1, "b": 1, "<missing>": 1}
+
+    def test_missing_bucket_is_not_a_class(self) -> None:
+        # Two balanced classes plus one missing row: the missing rows get their
+        # own warning, but they must not be reported as a minority class.
+        data = pd.DataFrame({"y": ["a"] * 10 + ["b"] * 10 + [None]})
+        report = DatasetAuditor().audit_dataframe(data, label_column="y")
+        messages = _messages(report, "labels")
+        assert any("missing label value(s)" in m for m in messages)
+        assert not any("imbalanced" in m for m in messages)
+
+    def test_imbalance_is_still_reported(self) -> None:
+        data = pd.DataFrame({"y": ["a"] * 99 + ["b"]})
+        report = DatasetAuditor().audit_dataframe(data, label_column="y")
+        assert any("imbalanced" in m for m in _messages(report, "labels"))
+
+
+class TestProfiles:
+    def test_text_columns_profile_as_categorical(self, tmp_path) -> None:
+        # pandas 3 reads text into a dedicated string dtype rather than object,
+        # so a dtype check against object alone loses the top-value summary.
+        path = tmp_path / "text.csv"
+        pd.DataFrame({"c": ["a", "a", "b"]}).to_csv(path, index=False)
+        data = DatasetAuditor.load_dataframe(str(path))
+        profile = DatasetAuditor._profile_columns(data)["c"]
+        assert profile["dtype"] == "categorical"
+        assert profile["top"] == "a"
+        assert profile["freq"] == 2
+
+    def test_no_deprecated_pandas_api_warnings(self) -> None:
+        data = pd.DataFrame(
+            {"c": pd.Categorical(["a", "b", "a"]), "n": [1.0, 2.0, 3.0]}
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            DatasetAuditor()._profile_columns(data)
+            DatasetAuditor._infer_dtype(data["c"])
+        assert not [w for w in caught if "is_categorical_dtype" in str(w.message)]
+
+
+class TestRendering:
+    def test_html_survives_an_entirely_missing_numeric_column(self) -> None:
+        data = pd.DataFrame({"n": [1.0, 2.0], "empty": pd.Series([None, None], dtype="float64")})
+        report = DatasetAuditor().audit_dataframe(data)
+        html = report.to_html()
+        assert "<td>Mean</td><td>?</td>" in html
+
+    def test_markdown_survives_an_entirely_missing_numeric_column(self) -> None:
+        data = pd.DataFrame({"empty": pd.Series([None, None], dtype="float64")})
+        report = DatasetAuditor().audit_dataframe(data)
+        assert "Mean: ?" in report.to_markdown()
+
+    def test_html_escapes_column_names(self) -> None:
+        data = pd.DataFrame({"<script>": [1, 2]})
+        html = DatasetAuditor().audit_dataframe(data).to_html()
+        assert "<script>" not in html.split("<style>")[1]
+
+
+class TestReportFiles:
+    def test_to_file_creates_parent_directories(self, tmp_path) -> None:
+        report = DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}))
+        destination = tmp_path / "nested" / "deeper" / "report.json"
+        report.to_file(str(destination))
+        assert destination.exists()
+
+    def test_to_file_rejects_unknown_extension(self, tmp_path) -> None:
+        report = DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}))
+        with pytest.raises(ValueError, match="Unsupported report format"):
+            report.to_file(str(tmp_path / "report.txt"))
+
+
+class TestFileLoading:
+    def test_audit_file_honours_encoding(self, tmp_path) -> None:
+        path = tmp_path / "latin.csv"
+        pd.DataFrame({"n": ["café", "b"], "v": [1, 2]}).to_csv(
+            path, index=False, encoding="latin-1"
+        )
+        report = DatasetAuditor().audit_file(str(path), encoding="latin-1")
+        assert report.rows == 2
+
+    def test_audit_file_honours_delimiter(self, tmp_path) -> None:
+        path = tmp_path / "semi.csv"
+        path.write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetAuditor().audit_file(str(path), delimiter=";")
+        assert report.columns == 2
+
+    def test_reference_is_read_with_the_same_options(self, tmp_path) -> None:
+        current = tmp_path / "cur.csv"
+        reference = tmp_path / "ref.csv"
+        current.write_text("a;b\n1;2\n", encoding="utf-8")
+        reference.write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetAuditor().audit_file(
+            str(current), reference_path=str(reference), delimiter=";"
+        )
+        assert report.columns == 2

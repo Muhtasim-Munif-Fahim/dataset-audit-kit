@@ -70,9 +70,19 @@ dataset-audit-kit audit data.parquet \
   --select-columns feature_1,feature_2,target
 ```
 
-Use `--json` if you want machine-readable output for automation.
+Use `--json` if you want machine-readable output for automation. In `--json`
+and `--minimal` mode, notices such as "report saved to ..." go to stderr, so
+stdout stays parseable: `dataset-audit-kit audit data.csv --json | jq .`.
 
 Use `--html-out report.html` to export a shareable standalone HTML report.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | No errors or warnings. Informational findings (a new column, an outlier note) do not fail the run. |
+| 1 | At least one warning or error was reported. |
+| 2 | The command could not run: bad arguments, unreadable input, or an unwritable output path. |
 
 Supported formats are `.csv`, `.jsonl`, `.ndjson`, and `.parquet`.
 
