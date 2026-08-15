@@ -1015,14 +1015,20 @@ class DatasetAuditor:
                     )
                 )
                 continue
-            total = len(data[col])
-            duplicates = int(data[col].duplicated(keep=False).sum()) // 2
+            # Count the redundant rows: every occurrence after the first. The
+            # old `duplicated(keep=False) // 2` undercounted whenever a value
+            # repeated more than twice (three copies reported as one).
+            duplicates = int(data[col].duplicated().sum())
             if duplicates > 0:
+                repeated = int(data[col].duplicated(keep=False).sum()) - duplicates
                 issues.append(
                     AuditIssue(
                         check="uniqueness",
                         severity="warning",
-                        message=f"{duplicates} duplicate value(s) in unique column '{col}'.",
+                        message=(
+                            f"{duplicates} duplicate row(s) across {repeated} repeated "
+                            f"value(s) in unique column '{col}'."
+                        ),
                         column=col,
                         observed=duplicates,
                     )
