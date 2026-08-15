@@ -20,7 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show version and exit",
     )
     parser.add_argument("--no-color", action="store_true", help="Disable colored output")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # Not required: `dataset-audit-kit --version` is a complete command line,
+    # and argparse would otherwise reject it for naming no subcommand.
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     audit = subparsers.add_parser("audit", help="Audit a dataset file")
     audit.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -1113,6 +1115,11 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         from . import __version__
         print(f"dataset-audit-kit v{__version__} (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
         return 0
+
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        print("\nError: a command is required.", file=sys.stderr)
+        return 2
 
     if args.command == "audit":
         return _cmd_audit(args)
