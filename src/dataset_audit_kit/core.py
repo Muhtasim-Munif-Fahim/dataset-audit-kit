@@ -1243,7 +1243,11 @@ class DatasetAuditor:
         """Infer a human-readable type for a series."""
         if pd.api.types.is_numeric_dtype(series):
             return "numeric"
-        if pd.api.types.is_categorical_dtype(series) or series.dtype == object or pd.api.types.is_string_dtype(series):
+        if (
+            isinstance(series.dtype, pd.CategoricalDtype)
+            or series.dtype == object
+            or pd.api.types.is_string_dtype(series)
+        ):
             # Check if mostly numeric
             numeric_count = pd.to_numeric(series.dropna(), errors="coerce").notna().sum()
             total_non_null = series.dropna().shape[0]
@@ -1383,7 +1387,7 @@ class DatasetAuditor:
                     profile["kurtosis"] = float(vals.kurtosis())
                     profile["outliers_iqr"] = outliers
                     profile["outlier_ratio"] = round(outliers / max(len(vals), 1), 4)
-            elif pd.api.types.is_categorical_dtype(col) or col.dtype == object:
+            elif isinstance(col.dtype, pd.CategoricalDtype) or col.dtype == object or pd.api.types.is_string_dtype(col):
                 profile["dtype"] = "categorical"
                 if len(non_null) > 0:
                     value_counts = non_null.astype(str).value_counts()
