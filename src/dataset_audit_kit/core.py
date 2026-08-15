@@ -1340,8 +1340,11 @@ class DatasetAuditor:
         """Build statistical profiles for all columns in the dataset."""
         profiles: dict[str, dict[str, object]] = {}
 
-        for column in data.columns:
-            col = data[column]
+        # Positional access: with a duplicated column name `data[name]` hands
+        # back a frame instead of a series, and every statistic below would
+        # blow up on it.
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
             non_null = col.dropna()
             profile: dict[str, object] = {
                 "count": int(len(col)),
