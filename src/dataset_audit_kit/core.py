@@ -195,7 +195,16 @@ class AuditReport:
 
     @property
     def status(self) -> str:
-        return "pass" if not self.issues else "warn"
+        # `info` findings (a new column, an outlier note) describe the dataset
+        # rather than fault it, so they must not turn the status — and with it
+        # the CLI exit code — into a failure.
+        return "warn" if self.blocking_issues else "pass"
+
+    @property
+    def blocking_issues(self) -> list[AuditIssue]:
+        """Issues that count against the dataset: errors and warnings."""
+
+        return [issue for issue in self.issues if issue.severity in {"error", "warning"}]
 
     @property
     def quality_score(self) -> int:
@@ -409,14 +418,17 @@ class AuditReport:
                     f"<tr><td>Unique</td><td>{profile.get('unique', '?')}</td></tr>"
                 )
                 if dtype == "numeric":
+                    # A column that is entirely missing has no statistics at
+                    # all, so every value goes through _format_stat rather than
+                    # a bare float format that would raise on the placeholder.
                     profile_sections.extend([
-                        f"<tr><td>Min</td><td>{profile.get('min', '?')}</td></tr>",
-                        f"<tr><td>Max</td><td>{profile.get('max', '?')}</td></tr>",
-                        f"<tr><td>Mean</td><td>{profile.get('mean', '?'):.3f}</td></tr>",
-                        f"<tr><td>Std</td><td>{profile.get('std', '?'):.3f}</td></tr>",
-                        f"<tr><td>Q1</td><td>{profile.get('q25', '?')}</td></tr>",
-                        f"<tr><td>Q2 (median)</td><td>{profile.get('q50', '?')}</td></tr>",
-                        f"<tr><td>Q3</td><td>{profile.get('q75', '?')}</td></tr>",
+                        f"<tr><td>Min</td><td>{esc(_format_stat(profile.get('min')))}</td></tr>",
+                        f"<tr><td>Max</td><td>{esc(_format_stat(profile.get('max')))}</td></tr>",
+                        f"<tr><td>Mean</td><td>{esc(_format_stat(profile.get('mean')))}</td></tr>",
+                        f"<tr><td>Std</td><td>{esc(_format_stat(profile.get('std')))}</td></tr>",
+                        f"<tr><td>Q1</td><td>{esc(_format_stat(profile.get('q25')))}</td></tr>",
+                        f"<tr><td>Q2 (median)</td><td>{esc(_format_stat(profile.get('q50')))}</td></tr>",
+                        f"<tr><td>Q3</td><td>{esc(_format_stat(profile.get('q75')))}</td></tr>",
                     ])
                 elif dtype == "categorical":
                     top_val = profile.get("top", "?")
@@ -566,6 +578,10 @@ class AuditReport:
                 "Supported formats are .json, .md, .html."
             )
 
+        # `--save-json reports/today.json` should not fail because `reports/`
+        # does not exist yet; the caller named a destination, not a directory.
+        if path_obj.parent != Path(""):
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
         path_obj.write_text(content, encoding="utf-8")
         return path
 
@@ -720,12 +736,16 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        encoding: str | None = None,
+        delimiter: str | None = None,
     ) -> AuditReport:
         return self.audit_file(
             data_path,
             reference_path=reference_path,
             label_column=label_column,
             expected_columns=expected_columns,
+            encoding=encoding,
+            delimiter=delimiter,
         )
 
     def audit_file(
@@ -736,9 +756,22 @@ class DatasetAuditor:
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
         unique_columns: Sequence[str] | None = None,
+        encoding: str | None = None,
+        delimiter: str | None = None,
     ) -> AuditReport:
-        data = self.load_dataframe(data_path)
-        reference = self.load_dataframe(reference_path) if reference_path else None
+        """Audit a dataset on disk.
+
+        ``encoding`` and ``delimiter`` are handed to the reader for both the
+        dataset and the reference, so a latin-1 or semicolon-separated pair
+        loads the same way through the file API as through ``load_dataframe``.
+        """
+
+        data = self.load_dataframe(data_path, encoding=encoding, delimiter=delimiter)
+        reference = (
+            self.load_dataframe(reference_path, encoding=encoding, delimiter=delimiter)
+            if reference_path
+            else None
+        )
         return self.audit_dataframe(
             data,
             reference=reference,
@@ -907,8 +940,25 @@ class DatasetAuditor:
         """
 
         seen: dict[str, str] = {}
+        exact_seen: set[str] = set()
         for column in data.columns:
             name = str(column)
+
+            if name in exact_seen:
+                issues.append(
+                    AuditIssue(
+                        check="column_names",
+                        severity="error",
+                        message=(
+                            "Duplicate column name: selecting it returns a frame "
+                            "rather than a series, which breaks most downstream code."
+                        ),
+                        column=name,
+                        observed=repr(name),
+                    )
+                )
+                continue
+            exact_seen.add(name)
 
             if name != name.strip():
                 issues.append(
@@ -1012,14 +1062,20 @@ class DatasetAuditor:
                     )
                 )
                 continue
-            total = len(data[col])
-            duplicates = int(data[col].duplicated(keep=False).sum()) // 2
+            # Count the redundant rows: every occurrence after the first. The
+            # old `duplicated(keep=False) // 2` undercounted whenever a value
+            # repeated more than twice (three copies reported as one).
+            duplicates = int(data[col].duplicated().sum())
             if duplicates > 0:
+                repeated = int(data[col].duplicated(keep=False).sum()) - duplicates
                 issues.append(
                     AuditIssue(
                         check="uniqueness",
                         severity="warning",
-                        message=f"{duplicates} duplicate value(s) in unique column '{col}'.",
+                        message=(
+                            f"{duplicates} duplicate row(s) across {repeated} repeated "
+                            f"value(s) in unique column '{col}'."
+                        ),
                         column=col,
                         observed=duplicates,
                     )
@@ -1031,9 +1087,13 @@ class DatasetAuditor:
         label_column: str,
         issues: list[AuditIssue],
     ) -> dict[str, int]:
-        counts = data[label_column].fillna("<missing>").astype(str).value_counts()
-        total = int(counts.sum()) or 1
-        missing_count = int(data[label_column].isna().sum())
+        labels = data[label_column]
+        # Going through object first: filling a Categorical with a value that is
+        # not one of its categories raises, so a categorical label column used
+        # to crash the whole audit here.
+        filled = labels.astype(object).where(labels.notna(), "<missing>").astype(str)
+        counts = filled.value_counts()
+        missing_count = int(labels.isna().sum())
         if missing_count:
             issues.append(
                 AuditIssue(
@@ -1045,7 +1105,12 @@ class DatasetAuditor:
                 )
             )
 
-        if counts.empty:
+        # Balance is a property of the labels that exist; the `<missing>` bucket
+        # is reported separately above and must not be mistaken for a class.
+        real_counts = counts.drop(labels="<missing>", errors="ignore")
+        real_total = int(real_counts.sum()) or 1
+
+        if real_counts.empty:
             issues.append(
                 AuditIssue(
                     check="labels",
@@ -1055,18 +1120,18 @@ class DatasetAuditor:
                     observed=0,
                 )
             )
-        elif counts.size < 2:
+        elif real_counts.size < 2:
             issues.append(
                 AuditIssue(
                     check="labels",
                     severity="warning",
                     message="Only one label value is present.",
                     column=label_column,
-                    observed=int(counts.iloc[0]),
+                    observed=int(real_counts.iloc[0]),
                 )
             )
         else:
-            minority_share = counts.min() / total
+            minority_share = real_counts.min() / real_total
             if minority_share < self.label_min_share:
                 issues.append(
                     AuditIssue(
@@ -1208,7 +1273,11 @@ class DatasetAuditor:
         """Infer a human-readable type for a series."""
         if pd.api.types.is_numeric_dtype(series):
             return "numeric"
-        if pd.api.types.is_categorical_dtype(series) or series.dtype == object or pd.api.types.is_string_dtype(series):
+        if (
+            isinstance(series.dtype, pd.CategoricalDtype)
+            or series.dtype == object
+            or pd.api.types.is_string_dtype(series)
+        ):
             # Check if mostly numeric
             numeric_count = pd.to_numeric(series.dropna(), errors="coerce").notna().sum()
             total_non_null = series.dropna().shape[0]
@@ -1314,8 +1383,11 @@ class DatasetAuditor:
         """Build statistical profiles for all columns in the dataset."""
         profiles: dict[str, dict[str, object]] = {}
 
-        for column in data.columns:
-            col = data[column]
+        # Positional access: with a duplicated column name `data[name]` hands
+        # back a frame instead of a series, and every statistic below would
+        # blow up on it.
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
             non_null = col.dropna()
             profile: dict[str, object] = {
                 "count": int(len(col)),
@@ -1345,7 +1417,7 @@ class DatasetAuditor:
                     profile["kurtosis"] = float(vals.kurtosis())
                     profile["outliers_iqr"] = outliers
                     profile["outlier_ratio"] = round(outliers / max(len(vals), 1), 4)
-            elif pd.api.types.is_categorical_dtype(col) or col.dtype == object:
+            elif isinstance(col.dtype, pd.CategoricalDtype) or col.dtype == object or pd.api.types.is_string_dtype(col):
                 profile["dtype"] = "categorical"
                 if len(non_null) > 0:
                     value_counts = non_null.astype(str).value_counts()

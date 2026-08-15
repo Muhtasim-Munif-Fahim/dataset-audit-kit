@@ -20,7 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show version and exit",
     )
     parser.add_argument("--no-color", action="store_true", help="Disable colored output")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # Not required: `dataset-audit-kit --version` is a complete command line,
+    # and argparse would otherwise reject it for naming no subcommand.
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     audit = subparsers.add_parser("audit", help="Audit a dataset file")
     audit.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -437,7 +439,15 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 print("Error: no columns left to audit after filtering.", file=sys.stderr)
                 return 2
             data = data[present]
-        reference = DatasetAuditor.load_dataframe(args.reference) if args.reference else None
+        reference = (
+            DatasetAuditor.load_dataframe(
+                args.reference,
+                encoding=getattr(args, "encoding", None),
+                delimiter=getattr(args, "delimiter", None),
+            )
+            if args.reference
+            else None
+        )
         report = auditor.audit_dataframe(
             data,
             reference=reference,
@@ -452,25 +462,46 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             label_column=args.label_column,
             expected_columns=_parse_columns(args.expected_columns),
             unique_columns=_parse_columns(args.unique_columns),
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
         )
 
+    # With --json or --minimal the output is meant to be consumed by another
+    # program, so progress notes go to stderr and leave stdout parseable.
+    machine_readable = bool(args.json or args.minimal)
+
+    def notice(message: str) -> None:
+        print(message, file=sys.stderr if machine_readable else sys.stdout)
+
     if args.html_out:
-        html_path = Path(args.html_out)
-        html_path.write_text(report.to_html(), encoding="utf-8")
+        try:
+            html_path = Path(args.html_out)
+            if html_path.parent != Path(""):
+                html_path.parent.mkdir(parents=True, exist_ok=True)
+            html_path.write_text(report.to_html(), encoding="utf-8")
+        except OSError as exc:
+            print(f"Cannot write HTML report to '{args.html_out}': {exc}", file=sys.stderr)
+            return 2
 
     if args.minimal:
-        errors = sum(1 for issue in report.issues if issue.severity == "error")
-        status = "PASS" if not report.issues else "FAIL"
-        print(f"[{status}] {len(report.issues)} issue(s), {errors} error(s).")
+        blocking = report.blocking_issues
+        errors = sum(1 for issue in blocking if issue.severity == "error")
+        status = "PASS" if report.status == "pass" else "FAIL"
+        print(f"[{status}] {len(blocking)} issue(s), {errors} error(s).")
     elif args.json:
-        print(report.to_json())
+        import json
+
+        payload = report.to_dict()
+        if args.fix_suggestions:
+            payload["fix_suggestions"] = report.fix_suggestions
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(report.to_markdown())
 
     if args.html_out:
-        print(f"HTML report written to {args.html_out}")
+        notice(f"HTML report written to {args.html_out}")
 
-    if args.fix_suggestions:
+    if args.fix_suggestions and not args.json:
         suggestions = report.fix_suggestions
         if suggestions:
             print()
@@ -484,15 +515,36 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             print()
             print("_No fix suggestions -- dataset is clean._")
 
-    if args.save_json:
-        saved = report.to_file(args.save_json)
-        print(f"JSON report saved to {saved}")
-
-    if args.save_markdown:
-        saved = report.to_file(args.save_markdown)
-        print(f"Markdown report saved to {saved}")
+    for path, content, label in (
+        (args.save_json, report.to_json(), "JSON"),
+        (args.save_markdown, report.to_markdown(), "Markdown"),
+    ):
+        if not path:
+            continue
+        error = _write_text(path, content)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+        notice(f"{label} report saved to {path}")
 
     return 0 if report.status == "pass" else 1
+
+
+def _write_text(path: str, content: str) -> str | None:
+    """Write text to a path, creating parent directories.
+
+    Returns an error message instead of raising, so a bad destination ends in a
+    one-line diagnostic rather than a traceback.
+    """
+
+    destination = Path(path)
+    try:
+        if destination.parent != Path(""):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"Cannot write report to '{path}': {exc}"
+    return None
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -509,24 +561,30 @@ def _cmd_check(args: argparse.Namespace) -> int:
         label_column=None,
         expected_columns=None,
         unique_columns=None,
+        encoding=getattr(args, "encoding", None),
+        delimiter=getattr(args, "delimiter", None),
     )
 
-    if report.issues:
+    for path, content in (
+        (args.save_json, report.to_json()),
+        (args.save_markdown, report.to_markdown()),
+    ):
+        if not path:
+            continue
+        error = _write_text(path, content)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+
+    blocking = report.blocking_issues
+    if blocking:
         if not args.minimal:
             print(report.to_markdown())
-        if args.save_json:
-            report.to_file(args.save_json)
-        if args.save_markdown:
-            report.to_file(args.save_markdown)
-        errors = sum(1 for issue in report.issues if issue.severity == "error")
-        summary = f"[FAIL] {len(report.issues)} issue(s), {errors} error(s) - check failed."
+        errors = sum(1 for issue in blocking if issue.severity == "error")
+        summary = f"[FAIL] {len(blocking)} issue(s), {errors} error(s) - check failed."
         print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
-    if args.save_json:
-        report.to_file(args.save_json)
-    if args.save_markdown:
-        report.to_file(args.save_markdown)
     if args.minimal:
         print("[PASS] 0 issue(s).")
     else:
@@ -596,8 +654,15 @@ def _cmd_hist(args: argparse.Namespace) -> int:
     if not pd.api.types.is_numeric_dtype(col):
         print(f"Column '{args.column}' is not numeric.", file=sys.stderr)
         return 1
+    if args.bins < 1:
+        print(f"--bins must be at least 1 (got {args.bins}).", file=sys.stderr)
+        return 2
+    if col.empty:
+        print(f"Column '{args.column}' has no non-missing values to plot.", file=sys.stderr)
+        return 1
     counts, edges = np.histogram(col, bins=args.bins)
-    max_count = max(counts) if len(counts) > 0 else 1
+    max_count = int(counts.max()) if len(counts) else 0
+    max_count = max_count or 1
     bar_width = 40
     block, divider = _bar_glyphs()
     print(f"Histogram for '{args.column}' ({len(col)} values, {args.bins} bins):")
@@ -1113,6 +1178,11 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         from . import __version__
         print(f"dataset-audit-kit v{__version__} (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
         return 0
+
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        print("\nError: a command is required.", file=sys.stderr)
+        return 2
 
     if args.command == "audit":
         return _cmd_audit(args)
