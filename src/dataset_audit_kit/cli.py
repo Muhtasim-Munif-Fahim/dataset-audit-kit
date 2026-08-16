@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write Markdown report to the specified path",
         default=None,
     )
+    audit.add_argument(
+        "--sarif-out",
+        help="Write SARIF 2.1.0 findings for code-scanning integrations",
+        default=None,
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -518,6 +523,11 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     for path, content, label in (
         (args.save_json, report.to_json(), "JSON"),
         (args.save_markdown, report.to_markdown(), "Markdown"),
+        (
+            args.sarif_out,
+            report.to_sarif(artifact_uri=str(Path(args.data).as_posix())),
+            "SARIF",
+        ),
     ):
         if not path:
             continue

@@ -58,6 +58,13 @@ class TestAuditOutput:
         assert main(["audit", clean_csv, "--save-markdown", str(destination)]) == 0
         assert destination.read_text().startswith("# Dataset Audit Report")
 
+    def test_sarif_output_is_machine_readable(self, tmp_path, clean_csv) -> None:
+        destination = tmp_path / "reports" / "audit.sarif"
+        assert main(["audit", clean_csv, "--sarif-out", str(destination)]) == 0
+        payload = json.loads(destination.read_text(encoding="utf-8"))
+        assert payload["version"] == "2.1.0"
+        assert payload["runs"][0]["tool"]["driver"]["name"] == "dataset-audit-kit"
+
     def test_unwritable_destination_reports_cleanly(self, tmp_path, clean_csv, capsys) -> None:
         blocker = tmp_path / "blocker"
         blocker.write_text("not a directory")

@@ -234,6 +234,69 @@ class AuditReport:
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
 
+    def to_sarif(self, *, artifact_uri: str = "dataset") -> str:
+        """Serialize findings as a SARIF 2.1.0 log for CI integrations."""
+
+        checks = sorted({issue.check for issue in self.issues})
+        rules = [
+            {
+                "id": check,
+                "name": check.replace("_", " ").title(),
+                "shortDescription": {"text": f"Dataset audit check: {check}"},
+            }
+            for check in checks
+        ]
+        levels = {"error": "error", "warning": "warning", "info": "note"}
+        results: list[dict[str, object]] = []
+        for issue in self.issues:
+            properties: dict[str, object] = {}
+            if issue.column is not None:
+                properties["column"] = issue.column
+            if issue.observed is not None:
+                properties["observed"] = issue.observed
+            if issue.threshold is not None:
+                properties["threshold"] = issue.threshold
+            result: dict[str, object] = {
+                "ruleId": issue.check,
+                "level": levels.get(issue.severity, "warning"),
+                "message": {"text": issue.message},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": artifact_uri}
+                        }
+                    }
+                ],
+            }
+            if properties:
+                result["properties"] = properties
+            results.append(result)
+
+        payload = {
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": "dataset-audit-kit",
+                            "informationUri": (
+                                "https://github.com/Muhtasim-Munif-Fahim/"
+                                "dataset-audit-kit"
+                            ),
+                            "rules": rules,
+                        }
+                    },
+                    "results": results,
+                    "properties": {
+                        "auditStatus": self.status,
+                        "qualityScore": self.quality_score,
+                    },
+                }
+            ],
+        }
+        return json.dumps(payload, indent=2, sort_keys=True)
+
     def to_markdown(self) -> str:
         lines = [
             "# Dataset Audit Report",

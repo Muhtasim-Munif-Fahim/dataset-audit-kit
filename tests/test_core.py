@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import warnings
 
 import pandas as pd
@@ -120,6 +121,32 @@ class TestProfiles:
 
 
 class TestRendering:
+    def test_sarif_maps_issues_and_column_metadata(self) -> None:
+        report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)
+        report.issues.append(
+            AuditIssue(
+                check="uniqueness",
+                severity="error",
+                message="Identifier is repeated.",
+                column="id",
+                observed=1,
+                threshold=0,
+            )
+        )
+
+        payload = json.loads(report.to_sarif(artifact_uri="data/train.csv"))
+        assert payload["version"] == "2.1.0"
+        result = payload["runs"][0]["results"][0]
+        assert result["ruleId"] == "uniqueness"
+        assert result["level"] == "error"
+        assert result["properties"] == {
+            "column": "id",
+            "observed": 1,
+            "threshold": 0,
+        }
+        location = result["locations"][0]["physicalLocation"]
+        assert location["artifactLocation"]["uri"] == "data/train.csv"
+
     def test_html_survives_an_entirely_missing_numeric_column(self) -> None:
         data = pd.DataFrame({"n": [1.0, 2.0], "empty": pd.Series([None, None], dtype="float64")})
         report = DatasetAuditor().audit_dataframe(data)
