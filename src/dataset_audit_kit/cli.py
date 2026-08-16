@@ -229,6 +229,24 @@ def build_parser() -> argparse.ArgumentParser:
     schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
     schema_parser.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
 
+    infer_rules_parser = subparsers.add_parser(
+        "infer-rules",
+        help="Infer a JSON validation contract from a baseline dataset",
+    )
+    infer_rules_parser.add_argument("data", help="Path to the baseline dataset")
+    infer_rules_parser.add_argument(
+        "--max-categories",
+        type=int,
+        default=20,
+        help="Maximum distinct values to encode as allowed values (default: 20)",
+    )
+    infer_rules_parser.add_argument(
+        "--missing-tolerance",
+        type=float,
+        default=0.0,
+        help="Extra missing fraction allowed above the baseline (default: 0)",
+    )
+
     rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
     rename_parser.add_argument("data", help="Path to the dataset")
     rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
@@ -926,6 +944,24 @@ def _cmd_schema(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_infer_rules(args: argparse.Namespace) -> int:
+    """Infer per-column validation rules and print them as JSON."""
+
+    import json
+
+    try:
+        rules = ValidationRules.infer(
+            _load(args),
+            max_categories=args.max_categories,
+            missing_tolerance=args.missing_tolerance,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(rules.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_rename(args: argparse.Namespace) -> int:
     """Handle the rename subcommand."""
     mapping: dict[str, str] = {}
@@ -1228,6 +1264,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_rename(args)
     elif args.command == "schema":
         return _cmd_schema(args)
+    elif args.command == "infer-rules":
+        return _cmd_infer_rules(args)
     elif args.command == "diff":
         return _cmd_diff(args)
     elif args.command == "refs":

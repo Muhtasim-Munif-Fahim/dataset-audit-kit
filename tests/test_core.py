@@ -8,7 +8,12 @@ import warnings
 import pandas as pd
 import pytest
 
-from dataset_audit_kit.core import AuditIssue, AuditReport, DatasetAuditor
+from dataset_audit_kit.core import (
+    AuditIssue,
+    AuditReport,
+    DatasetAuditor,
+    ValidationRules,
+)
 
 
 def _messages(report: AuditReport, check: str) -> list[str]:
@@ -118,6 +123,29 @@ class TestProfiles:
             DatasetAuditor()._profile_columns(data)
             DatasetAuditor._infer_dtype(data["c"])
         assert not [w for w in caught if "is_categorical_dtype" in str(w.message)]
+
+
+class TestRuleInference:
+    def test_infers_bounds_categories_and_missing_tolerance(self) -> None:
+        data = pd.DataFrame(
+            {
+                "age": [20.0, 35.0, None],
+                "group": ["control", "treated", "control"],
+            }
+        )
+        rules = ValidationRules.infer(data, missing_tolerance=0.1)
+
+        assert rules.columns["age"].dtype == "numeric"
+        assert rules.columns["age"].min_value == 20.0
+        assert rules.columns["age"].max_value == 35.0
+        assert rules.columns["age"].max_missing_ratio == pytest.approx(1 / 3 + 0.1)
+        assert rules.columns["group"].allowed_values == ["control", "treated"]
+
+    def test_high_cardinality_text_does_not_freeze_values(self) -> None:
+        data = pd.DataFrame({"id": [f"subject-{i}" for i in range(30)]})
+        rules = ValidationRules.infer(data, max_categories=5)
+        assert rules.columns["id"].dtype == "categorical"
+        assert rules.columns["id"].allowed_values is None
 
 
 class TestRendering:

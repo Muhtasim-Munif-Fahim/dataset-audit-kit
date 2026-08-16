@@ -129,6 +129,12 @@ class TestHist:
 
 
 class TestOtherSubcommands:
+    def test_infer_rules_writes_a_reusable_contract(self, clean_csv, capsys) -> None:
+        assert main(["infer-rules", clean_csv, "--max-categories", "5"]) == 0
+        rules = json.loads(capsys.readouterr().out)
+        assert rules["id"]["dtype"] == "numeric"
+        assert rules["label"]["allowed_values"] == ["no", "yes"]
+
     @pytest.mark.parametrize(
         "argv",
         [

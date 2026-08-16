@@ -166,6 +166,57 @@ class ValidationRules:
             raw: dict[str, dict[str, object]] = json.load(f)
         return cls.from_dict(raw)
 
+    @classmethod
+    def infer(
+        cls,
+        data: pd.DataFrame,
+        *,
+        max_categories: int = 20,
+        missing_tolerance: float = 0.0,
+    ) -> "ValidationRules":
+        """Infer a reusable validation contract from a baseline dataframe.
+
+        Numeric columns receive observed bounds. Low-cardinality categorical
+        columns receive an allowed-value set, while high-cardinality text
+        columns retain only their inferred type and missingness allowance.
+        """
+
+        if max_categories < 1:
+            raise ValueError("max_categories must be at least 1")
+        if not 0.0 <= missing_tolerance <= 1.0:
+            raise ValueError("missing_tolerance must be between 0 and 1")
+        if data.columns.duplicated().any():
+            raise ValueError("cannot infer rules from duplicate column names")
+
+        inferred: dict[str, ColumnRule] = {}
+        for name in data.columns:
+            series = data[name]
+            dtype = DatasetAuditor._infer_dtype(series)
+            non_missing = series.dropna()
+            min_value: float | None = None
+            max_value: float | None = None
+            allowed_values: list[str] | None = None
+
+            if dtype == "numeric" and not non_missing.empty:
+                numeric = pd.to_numeric(non_missing, errors="coerce").dropna()
+                if not numeric.empty:
+                    min_value = float(numeric.min())
+                    max_value = float(numeric.max())
+            elif non_missing.nunique() <= max_categories:
+                allowed_values = sorted({str(value) for value in non_missing})
+
+            inferred[str(name)] = ColumnRule(
+                name=str(name),
+                dtype=dtype,
+                min_value=min_value,
+                max_value=max_value,
+                allowed_values=allowed_values,
+                max_missing_ratio=min(
+                    1.0, float(series.isna().mean()) + missing_tolerance
+                ),
+            )
+        return cls(columns=inferred)
+
     def to_dict(self) -> dict[str, dict[str, object]]:
         """Serialize to a plain dictionary for JSON export."""
         result: dict[str, dict[str, object]] = {}
