@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Sequence
+from xml.etree import ElementTree
 
 import pandas as pd
 
@@ -360,6 +361,45 @@ class AuditReport:
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
+    def to_junit_xml(self, *, suite_name: str = "dataset-audit") -> str:
+        """Serialize audit findings as JUnit XML for CI test reporters."""
+
+        blocking = self.blocking_issues
+        cases = self.issues or [
+            AuditIssue(check="audit", severity="info", message="No issues found.")
+        ]
+        suite = ElementTree.Element(
+            "testsuite",
+            {
+                "name": suite_name,
+                "tests": str(len(cases)),
+                "failures": str(len(blocking)),
+                "skipped": str(sum(issue.severity == "info" for issue in self.issues)),
+            },
+        )
+        properties = ElementTree.SubElement(suite, "properties")
+        ElementTree.SubElement(
+            properties, "property", {"name": "status", "value": self.status}
+        )
+        ElementTree.SubElement(
+            properties,
+            "property",
+            {"name": "quality_score", "value": str(self.quality_score)},
+        )
+        for issue in cases:
+            name = issue.check if issue.column is None else f"{issue.check}[{issue.column}]"
+            case = ElementTree.SubElement(
+                suite, "testcase", {"classname": "dataset_audit", "name": name}
+            )
+            if issue.severity in {"error", "warning"}:
+                failure = ElementTree.SubElement(
+                    case, "failure", {"type": issue.severity, "message": issue.message}
+                )
+                failure.text = issue.message
+            elif self.issues:
+                ElementTree.SubElement(case, "skipped", {"message": issue.message})
+        return ElementTree.tostring(suite, encoding="unicode")
+
     def to_markdown(self) -> str:
         lines = [
             "# Dataset Audit Report",
@@ -678,6 +718,7 @@ class AuditReport:
         - ``.json`` — JSON format
         - ``.md`` — Markdown format
         - ``.html`` — HTML format
+        - ``.xml`` — JUnit XML format
 
         Parameters
         ----------
@@ -698,10 +739,12 @@ class AuditReport:
             content = self.to_markdown()
         elif suffix == ".html":
             content = self.to_html()
+        elif suffix == ".xml":
+            content = self.to_junit_xml()
         else:
             raise ValueError(
                 f"Unsupported report format '{suffix}'. "
-                "Supported formats are .json, .md, .html."
+                "Supported formats are .json, .md, .html, .xml."
             )
 
         # `--save-json reports/today.json` should not fail because `reports/`

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from xml.etree import ElementTree
 
 import pandas as pd
 import pytest
@@ -210,6 +211,30 @@ class TestRendering:
         data = pd.DataFrame({"<script>": [1, 2]})
         html = DatasetAuditor().audit_dataframe(data).to_html()
         assert "<script>" not in html.split("<style>")[1]
+
+    def test_junit_xml_maps_blocking_and_informational_findings(self) -> None:
+        report = AuditReport(rows=2, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.extend(
+            [
+                AuditIssue("rule", "warning", "Bad <value>", column="code"),
+                AuditIssue("schema_diff", "info", "Column added", column="new"),
+            ]
+        )
+        root = ElementTree.fromstring(report.to_junit_xml(suite_name="nightly"))
+        assert root.attrib == {
+            "name": "nightly",
+            "tests": "2",
+            "failures": "1",
+            "skipped": "1",
+        }
+        failure = root.find("./testcase/failure")
+        assert failure is not None and failure.text == "Bad <value>"
+
+    def test_junit_xml_writes_through_report_file_api(self, tmp_path) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        destination = tmp_path / "reports" / "audit.xml"
+        report.to_file(str(destination))
+        assert ElementTree.parse(destination).getroot().attrib["failures"] == "0"
 
 
 class TestReportFiles:
