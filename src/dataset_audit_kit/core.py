@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -121,6 +122,8 @@ class ColumnRule:
     max_missing_ratio : float | None
         Maximum allowed fraction of missing values for this column.
         Overrides the global ``missing_threshold`` when set.
+    pattern : str | None
+        Regular expression that every non-missing string value must fully match.
     """
 
     name: str
@@ -129,6 +132,7 @@ class ColumnRule:
     max_value: float | None = None
     allowed_values: list[str] | None = None
     max_missing_ratio: float | None = None
+    pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +159,7 @@ class ValidationRules:
                 max_value=col_config.get("max_value"),
                 allowed_values=col_config.get("allowed_values"),
                 max_missing_ratio=col_config.get("max_missing_ratio"),
+                pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
             )
         return cls(columns=column_rules)
 
@@ -222,7 +227,14 @@ class ValidationRules:
         result: dict[str, dict[str, object]] = {}
         for name, rule in self.columns.items():
             entry: dict[str, object] = {}
-            for attr in ("dtype", "min_value", "max_value", "allowed_values", "max_missing_ratio"):
+            for attr in (
+                "dtype",
+                "min_value",
+                "max_value",
+                "allowed_values",
+                "max_missing_ratio",
+                "pattern",
+            ):
                 value = getattr(rule, attr)
                 if value is not None:
                     entry[attr] = value
@@ -1379,6 +1391,30 @@ class DatasetAuditor:
                             message=f"Unexpected values found: {', '.join(sorted(unexpected)[:10])}.",
                             column=column_name,
                             observed=len(unexpected),
+                        )
+                    )
+
+            # --- text pattern contract ---
+            if rule.pattern is not None:
+                try:
+                    matcher = re.compile(rule.pattern)
+                except re.error as exc:
+                    raise ValueError(
+                        f"Invalid pattern for column '{column_name}': {exc}"
+                    ) from exc
+                values = col_data.dropna().astype(str)
+                violations = int((~values.map(lambda value: bool(matcher.fullmatch(value)))).sum())
+                if violations:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=(
+                                f"{violations} value(s) do not match pattern "
+                                f"'{rule.pattern}'."
+                            ),
+                            column=column_name,
+                            observed=violations,
                         )
                     )
 

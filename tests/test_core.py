@@ -148,6 +148,26 @@ class TestRuleInference:
         assert rules.columns["id"].allowed_values is None
 
 
+class TestTextPatternRules:
+    def test_reports_values_that_do_not_fully_match(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"subject_id": {"pattern": r"SUBJ-\d{3}"}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"subject_id": ["SUBJ-001", "SUBJ-12", None]})
+        )
+        assert "1 value(s) do not match pattern" in _messages(report, "rule")[0]
+
+    def test_pattern_round_trips_in_rule_dictionary(self) -> None:
+        rules = ValidationRules.from_dict({"code": {"pattern": "[A-Z]+"}})
+        assert rules.to_dict()["code"]["pattern"] == "[A-Z]+"
+
+    def test_invalid_pattern_identifies_the_column(self) -> None:
+        rules = ValidationRules.from_dict({"code": {"pattern": "["}})
+        with pytest.raises(ValueError, match="column 'code'"):
+            DatasetAuditor(rules=rules).audit_dataframe(pd.DataFrame({"code": ["A"]}))
+
+
 class TestRendering:
     def test_sarif_maps_issues_and_column_metadata(self) -> None:
         report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)
