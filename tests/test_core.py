@@ -211,6 +211,22 @@ class TestTextPatternRules:
 
 
 class TestRendering:
+    def test_csv_contains_a_stable_flat_findings_schema(self) -> None:
+        report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)
+        report.issues.append(
+            AuditIssue(
+                check="duplicates",
+                severity="warning",
+                message="row, contains comma",
+                column="id",
+                observed=1,
+            )
+        )
+
+        lines = report.to_csv().splitlines()
+        assert lines[0] == "severity,check,column,message,observed,threshold"
+        assert 'warning,duplicates,id,"row, contains comma",1,' in lines[1]
+
     def test_sarif_maps_issues_and_column_metadata(self) -> None:
         report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)
         report.issues.append(
@@ -289,6 +305,14 @@ class TestReportFiles:
         report = DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}))
         with pytest.raises(ValueError, match="Unsupported report format"):
             report.to_file(str(tmp_path / "report.txt"))
+
+    def test_to_file_supports_csv_findings(self, tmp_path) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        destination = tmp_path / "reports" / "audit.csv"
+        report.to_file(str(destination))
+        assert destination.read_text(encoding="utf-8").startswith(
+            "severity,check,column,message,observed,threshold\n"
+        )
 
 
 class TestFileLoading:

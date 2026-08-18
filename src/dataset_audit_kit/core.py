@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import html
+import io
 import json
 import re
 import sys
@@ -535,6 +537,31 @@ class AuditReport:
                 ElementTree.SubElement(case, "skipped", {"message": issue.message})
         return ElementTree.tostring(suite, encoding="unicode")
 
+    def to_csv(self) -> str:
+        """Serialize each finding as one flat CSV row.
+
+        JSON and HTML are useful for people, while a flat findings table is
+        easier for CI jobs and spreadsheet tools to consume. A clean audit
+        still emits the header so downstream jobs can rely on a stable schema.
+        """
+
+        fields = ["severity", "check", "column", "message", "observed", "threshold"]
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for issue in self.issues:
+            writer.writerow(
+                {
+                    "severity": issue.severity,
+                    "check": issue.check,
+                    "column": issue.column or "",
+                    "message": issue.message,
+                    "observed": "" if issue.observed is None else issue.observed,
+                    "threshold": "" if issue.threshold is None else issue.threshold,
+                }
+            )
+        return output.getvalue()
+
     def to_markdown(self) -> str:
         lines = [
             "# Dataset Audit Report",
@@ -876,10 +903,12 @@ class AuditReport:
             content = self.to_html()
         elif suffix == ".xml":
             content = self.to_junit_xml()
+        elif suffix == ".csv":
+            content = self.to_csv()
         else:
             raise ValueError(
                 f"Unsupported report format '{suffix}'. "
-                "Supported formats are .json, .md, .html, .xml."
+                "Supported formats are .json, .md, .html, .xml, .csv."
             )
 
         # `--save-json reports/today.json` should not fail because `reports/`

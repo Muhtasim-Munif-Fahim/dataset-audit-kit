@@ -139,6 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write SARIF 2.1.0 findings for code-scanning integrations",
         default=None,
     )
+    audit.add_argument(
+        "--csv-out",
+        help="Write flat CSV findings for CI or spreadsheet consumers",
+        default=None,
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -181,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--save-markdown",
         help="Write Markdown report to the specified path",
+        default=None,
+    )
+    check.add_argument(
+        "--csv-out",
+        help="Write flat CSV findings for CI or spreadsheet consumers",
         default=None,
     )
 
@@ -564,6 +574,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             report.to_sarif(artifact_uri=str(Path(args.data).as_posix())),
             "SARIF",
         ),
+        (args.csv_out, report.to_csv(), "CSV"),
     ):
         if not path:
             continue
@@ -614,6 +625,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     for path, content in (
         (args.save_json, report.to_json()),
         (args.save_markdown, report.to_markdown()),
+        (args.csv_out, report.to_csv()),
     ):
         if not path:
             continue

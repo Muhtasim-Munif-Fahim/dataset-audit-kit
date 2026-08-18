@@ -65,6 +65,13 @@ class TestAuditOutput:
         assert payload["version"] == "2.1.0"
         assert payload["runs"][0]["tool"]["driver"]["name"] == "dataset-audit-kit"
 
+    def test_csv_output_is_machine_readable(self, tmp_path, clean_csv) -> None:
+        destination = tmp_path / "reports" / "audit.csv"
+        assert main(["audit", clean_csv, "--csv-out", str(destination)]) == 0
+        assert destination.read_text(encoding="utf-8").splitlines()[0] == (
+            "severity,check,column,message,observed,threshold"
+        )
+
     def test_unwritable_destination_reports_cleanly(self, tmp_path, clean_csv, capsys) -> None:
         blocker = tmp_path / "blocker"
         blocker.write_text("not a directory")
