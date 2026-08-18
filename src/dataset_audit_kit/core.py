@@ -991,6 +991,40 @@ class AuditReport:
             issues=issues_diff,
         )
 
+
+@dataclass
+class BatchAuditReport:
+    """Deterministic collection of reports produced by :meth:`audit_many`."""
+
+    reports: dict[str, AuditReport] = field(default_factory=dict)
+
+    @property
+    def status(self) -> str:
+        return "warn" if any(report.status == "warn" for report in self.reports.values()) else "pass"
+
+    @property
+    def failed_paths(self) -> list[str]:
+        """Return input paths with at least one warning or error."""
+
+        return [path for path, report in self.reports.items() if report.blocking_issues]
+
+    def gated_paths(self, fail_on: str = "warning") -> list[str]:
+        """Return input paths that fail the requested severity gate."""
+
+        return [path for path, report in self.reports.items() if report.gated_issues(fail_on)]
+
+    def exit_code(self, fail_on: str = "warning") -> int:
+        return 1 if self.gated_paths(fail_on) else 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "files": {path: report.to_dict() for path, report in self.reports.items()},
+        }
+
+    def to_json(self, *, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
+
 class DatasetAuditor:
     """Run a small battery of quality checks over tabular data."""
 
@@ -1160,6 +1194,40 @@ class DatasetAuditor:
             unique_columns=unique_columns,
             unique_together=unique_together,
         )
+
+    def audit_many(
+        self,
+        data_paths: Sequence[str | Path],
+        *,
+        reference_path: str | Path | None = None,
+        label_column: str | None = None,
+        expected_columns: Sequence[str] | None = None,
+        unique_columns: Sequence[str] | None = None,
+        unique_together: Sequence[Sequence[str]] | None = None,
+        encoding: str | None = None,
+        delimiter: str | None = None,
+    ) -> BatchAuditReport:
+        """Audit multiple datasets while preserving input order.
+
+        The same optional reference and validation settings are applied to
+        every path.  Results are keyed by the caller-provided path spelling so
+        a batch can be joined back to its manifest without path rewriting.
+        """
+
+        reports = {
+            str(path): self.audit_file(
+                path,
+                reference_path=str(reference_path) if reference_path is not None else None,
+                label_column=label_column,
+                expected_columns=expected_columns,
+                unique_columns=unique_columns,
+                unique_together=unique_together,
+                encoding=encoding,
+                delimiter=delimiter,
+            )
+            for path in data_paths
+        }
+        return BatchAuditReport(reports=reports)
 
     @staticmethod
     def load_dataframe(

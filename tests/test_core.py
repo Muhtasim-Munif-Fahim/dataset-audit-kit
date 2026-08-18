@@ -12,6 +12,7 @@ import pytest
 from dataset_audit_kit.core import (
     AuditIssue,
     AuditReport,
+    BatchAuditReport,
     DatasetAuditor,
     DatasetBaseline,
     ValidationRules,
@@ -256,6 +257,34 @@ class TestCardinalityRules:
             ValidationRules.from_dict(
                 {"code": {"min_unique": 4, "max_unique": 2}}
             )
+
+
+class TestBatchAuditing:
+    def test_audit_many_preserves_input_order_and_reports_failed_paths(self, tmp_path) -> None:
+        clean = tmp_path / "clean.csv"
+        duplicate = tmp_path / "duplicate.csv"
+        pd.DataFrame({"id": [1, 2]}).to_csv(clean, index=False)
+        pd.DataFrame({"id": [1, 1]}).to_csv(duplicate, index=False)
+
+        batch = DatasetAuditor().audit_many([clean, duplicate])
+
+        assert list(batch.reports) == [str(clean), str(duplicate)]
+        assert batch.failed_paths == [str(duplicate)]
+        assert batch.exit_code() == 1
+        assert batch.exit_code("error") == 0
+
+    def test_batch_json_contains_each_file_report(self, tmp_path) -> None:
+        first = tmp_path / "first.csv"
+        second = tmp_path / "second.csv"
+        pd.DataFrame({"value": [1]}).to_csv(first, index=False)
+        pd.DataFrame({"value": [2]}).to_csv(second, index=False)
+
+        payload = BatchAuditReport(
+            {str(first): DatasetAuditor().audit_file(first), str(second): DatasetAuditor().audit_file(second)}
+        ).to_dict()
+
+        assert payload["status"] == "pass"
+        assert set(payload["files"]) == {str(first), str(second)}
 
 
 class TestRendering:
