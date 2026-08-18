@@ -821,6 +821,7 @@ class DatasetAuditor:
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
         unique_columns: Sequence[str] | None = None,
+        unique_together: Sequence[Sequence[str]] | None = None,
     ) -> AuditReport:
         if not isinstance(data, pd.DataFrame):
             raise TypeError("data must be a pandas.DataFrame")
@@ -851,6 +852,8 @@ class DatasetAuditor:
         progress.advance("uniqueness")
         if unique_columns is not None:
             self._check_uniqueness(data, unique_columns, issues)
+        if unique_together is not None:
+            self._check_composite_uniqueness(data, unique_together, issues)
 
         progress.advance("label balance")
         label_distribution: dict[str, int] = {}
@@ -905,6 +908,7 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
         delimiter: str | None = None,
     ) -> AuditReport:
@@ -913,6 +917,7 @@ class DatasetAuditor:
             reference_path=reference_path,
             label_column=label_column,
             expected_columns=expected_columns,
+            unique_together=unique_together,
             encoding=encoding,
             delimiter=delimiter,
         )
@@ -925,6 +930,7 @@ class DatasetAuditor:
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
         unique_columns: Sequence[str] | None = None,
+        unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
         delimiter: str | None = None,
     ) -> AuditReport:
@@ -947,6 +953,7 @@ class DatasetAuditor:
             label_column=label_column,
             expected_columns=expected_columns,
             unique_columns=unique_columns,
+            unique_together=unique_together,
         )
 
     @staticmethod
@@ -1247,6 +1254,46 @@ class DatasetAuditor:
                         ),
                         column=col,
                         observed=duplicates,
+                    )
+                )
+
+    @staticmethod
+    def _check_composite_uniqueness(
+        data: pd.DataFrame,
+        groups: Sequence[Sequence[str]],
+        issues: list[AuditIssue],
+    ) -> None:
+        """Validate uniqueness constraints spanning two or more columns."""
+
+        for raw_group in groups:
+            group = [str(column) for column in raw_group]
+            if len(group) < 2:
+                raise ValueError("unique_together groups must contain at least two columns")
+            missing = [column for column in group if column not in data.columns]
+            label = ", ".join(group)
+            if missing:
+                issues.append(
+                    AuditIssue(
+                        check="composite_uniqueness",
+                        severity="error",
+                        message=(
+                            f"Composite key [{label}] references missing column(s): "
+                            f"{', '.join(missing)}."
+                        ),
+                    )
+                )
+                continue
+            duplicate_rows = int(data.duplicated(subset=group, keep="first").sum())
+            if duplicate_rows:
+                issues.append(
+                    AuditIssue(
+                        check="composite_uniqueness",
+                        severity="error",
+                        message=(
+                            f"Composite key [{label}] has {duplicate_rows} duplicate row(s)."
+                        ),
+                        observed=duplicate_rows,
+                        threshold=0,
                     )
                 )
 

@@ -59,6 +59,22 @@ class TestUniqueness:
         )
         assert "not found" in _messages(report, "uniqueness")[0]
 
+    def test_composite_key_detects_duplicate_combinations(self) -> None:
+        data = pd.DataFrame(
+            {"site": ["A", "A", "A"], "subject": [1, 1, 2], "visit": [1, 2, 1]}
+        )
+        report = DatasetAuditor().audit_dataframe(
+            data, unique_together=[["site", "subject"]]
+        )
+        assert "1 duplicate row(s)" in _messages(report, "composite_uniqueness")[0]
+
+    def test_composite_key_can_be_unique_when_members_are_not(self) -> None:
+        data = pd.DataFrame({"site": ["A", "A"], "subject": [1, 2]})
+        report = DatasetAuditor().audit_dataframe(
+            data, unique_together=[["site", "subject"]]
+        )
+        assert _messages(report, "composite_uniqueness") == []
+
 
 class TestColumnNames:
     def test_exact_duplicate_names_are_flagged(self) -> None:

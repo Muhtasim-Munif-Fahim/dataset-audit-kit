@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--unique-together",
+        action="append",
+        metavar="COL1,COL2",
+        help="Columns forming a composite unique key; repeatable",
+        default=None,
+    )
+    audit.add_argument(
         "--select-columns",
         help="Comma-separated columns to audit",
         default=None,
@@ -371,6 +378,15 @@ def _parse_columns(raw: str | None) -> Sequence[str] | None:
     return columns or None
 
 
+def _parse_unique_groups(raw: Sequence[str] | None) -> list[list[str]] | None:
+    if raw is None:
+        return None
+    return [
+        [column.strip() for column in group.split(",") if column.strip()]
+        for group in raw
+    ]
+
+
 def _apply_date_filter(
     data: "pd.DataFrame", args: argparse.Namespace
 ) -> "tuple[pd.DataFrame | None, str | None]":
@@ -477,6 +493,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             label_column=args.label_column,
             expected_columns=_parse_columns(args.expected_columns),
             unique_columns=_parse_columns(args.unique_columns),
+            unique_together=_parse_unique_groups(args.unique_together),
         )
     else:
         report = auditor.audit_file(
@@ -485,6 +502,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             label_column=args.label_column,
             expected_columns=_parse_columns(args.expected_columns),
             unique_columns=_parse_columns(args.unique_columns),
+            unique_together=_parse_unique_groups(args.unique_together),
             encoding=getattr(args, "encoding", None),
             delimiter=getattr(args, "delimiter", None),
         )
