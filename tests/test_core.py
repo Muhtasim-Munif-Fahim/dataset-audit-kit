@@ -13,6 +13,7 @@ from dataset_audit_kit.core import (
     AuditIssue,
     AuditReport,
     DatasetAuditor,
+    DatasetBaseline,
     ValidationRules,
 )
 
@@ -140,6 +141,30 @@ class TestProfiles:
             DatasetAuditor()._profile_columns(data)
             DatasetAuditor._infer_dtype(data["c"])
         assert not [w for w in caught if "is_categorical_dtype" in str(w.message)]
+
+
+class TestDatasetBaseline:
+    def test_compares_new_data_without_raw_reference_rows(self) -> None:
+        baseline = DatasetBaseline.from_dataframe(
+            pd.DataFrame({"value": [0.0, 1.0, 2.0, 3.0], "group": ["a", "a", "b", "b"]})
+        )
+        current = pd.DataFrame(
+            {"value": [20.0, 21.0, None, None], "new_column": [1, 2, 3, 4]}
+        )
+        issues = baseline.compare(current, missing_ratio_delta=0.2, mean_shift_std=2.0)
+        checks = {issue.check for issue in issues}
+        assert checks == {
+            "baseline_schema",
+            "baseline_missingness",
+            "baseline_mean_shift",
+        }
+
+    def test_baseline_round_trips_as_json(self, tmp_path) -> None:
+        baseline = DatasetBaseline.from_dataframe(pd.DataFrame({"value": [1.0, 2.0]}))
+        path = baseline.to_file(tmp_path / "profiles" / "baseline.json")
+        restored = DatasetBaseline.from_json(path)
+        assert restored.rows == 2
+        assert restored.column_profiles["value"]["mean"] == 1.5
 
 
 class TestRuleInference:

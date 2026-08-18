@@ -1,6 +1,13 @@
 ﻿"""Public exports for dataset-audit-kit."""
 
-from .core import AuditIssue, AuditReport, ColumnRule, DatasetAuditor, ValidationRules
+from .core import (
+    AuditIssue,
+    AuditReport,
+    ColumnRule,
+    DatasetAuditor,
+    DatasetBaseline,
+    ValidationRules,
+)
 
 __version__ = "0.3.6"
 
@@ -9,6 +16,7 @@ __all__ = [
     "AuditReport",
     "ColumnRule",
     "DatasetAuditor",
+    "DatasetBaseline",
     "ValidationRules",
     "__version__",
 ]

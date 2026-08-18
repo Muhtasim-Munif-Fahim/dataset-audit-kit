@@ -243,6 +243,141 @@ class ValidationRules:
         return result
 
 
+@dataclass(frozen=True)
+class DatasetBaseline:
+    """Privacy-preserving column profile for monitoring future datasets."""
+
+    rows: int
+    column_profiles: dict[str, dict[str, object]]
+
+    @classmethod
+    def from_dataframe(cls, data: pd.DataFrame) -> "DatasetBaseline":
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError("data must be a pandas.DataFrame")
+        return cls(
+            rows=int(len(data)),
+            column_profiles=DatasetAuditor._profile_columns(data),
+        )
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "DatasetBaseline":
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot read dataset baseline '{path}': {exc}") from exc
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("column_profiles"), dict
+        ):
+            raise ValueError("dataset baseline must contain column_profiles")
+        return cls(
+            rows=int(payload.get("rows", 0)),
+            column_profiles=payload["column_profiles"],
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "rows": self.rows,
+            "column_profiles": self.column_profiles,
+        }
+
+    def to_file(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return target
+
+    def compare(
+        self,
+        data: pd.DataFrame,
+        *,
+        missing_ratio_delta: float = 0.10,
+        mean_shift_std: float = 3.0,
+    ) -> list[AuditIssue]:
+        """Compare new data without retaining the baseline's raw records."""
+
+        if missing_ratio_delta < 0 or mean_shift_std <= 0:
+            raise ValueError("comparison thresholds must be positive")
+        current = DatasetAuditor._profile_columns(data)
+        issues: list[AuditIssue] = []
+        baseline_names = set(self.column_profiles)
+        current_names = set(current)
+        for name in sorted(baseline_names - current_names):
+            issues.append(
+                AuditIssue(
+                    check="baseline_schema",
+                    severity="error",
+                    message=f"Baseline column '{name}' is missing.",
+                    column=name,
+                )
+            )
+        for name in sorted(current_names - baseline_names):
+            issues.append(
+                AuditIssue(
+                    check="baseline_schema",
+                    severity="info",
+                    message=f"New column '{name}' was added.",
+                    column=name,
+                )
+            )
+        for name in sorted(baseline_names & current_names):
+            before = self.column_profiles[name]
+            after = current[name]
+            if before.get("dtype") != after.get("dtype"):
+                issues.append(
+                    AuditIssue(
+                        check="baseline_dtype",
+                        severity="error",
+                        message=(
+                            f"Column dtype changed from {before.get('dtype')} "
+                            f"to {after.get('dtype')}."
+                        ),
+                        column=name,
+                    )
+                )
+                continue
+            before_count = max(int(before.get("count", 0)), 1)
+            after_count = max(int(after.get("count", 0)), 1)
+            before_missing = float(before.get("missing", 0)) / before_count
+            after_missing = float(after.get("missing", 0)) / after_count
+            delta = after_missing - before_missing
+            if delta > missing_ratio_delta:
+                issues.append(
+                    AuditIssue(
+                        check="baseline_missingness",
+                        severity="warning",
+                        message=f"Missing ratio increased by {delta:.1%}.",
+                        column=name,
+                        observed=after_missing,
+                        threshold=before_missing + missing_ratio_delta,
+                    )
+                )
+            if before.get("dtype") == "numeric":
+                try:
+                    baseline_mean = float(before["mean"])
+                    current_mean = float(after["mean"])
+                    baseline_std = float(before["std"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if baseline_std > 0:
+                    shift = abs(current_mean - baseline_mean) / baseline_std
+                    if shift > mean_shift_std:
+                        issues.append(
+                            AuditIssue(
+                                check="baseline_mean_shift",
+                                severity="warning",
+                                message=f"Mean shifted by {shift:.2f} baseline standard deviations.",
+                                column=name,
+                                observed=shift,
+                                threshold=mean_shift_std,
+                            )
+                        )
+        return issues
+
+
 @dataclass
 class AuditReport:
     """Structured output from a dataset audit."""
