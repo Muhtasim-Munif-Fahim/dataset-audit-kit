@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drift score threshold before warning",
     )
     audit.add_argument(
+        "--fail-on",
+        choices=["warning", "error"],
+        default="warning",
+        help="Severity at or above which the command exits with code 1",
+    )
+    audit.add_argument(
         "--rules",
         help="Path to a JSON file with per-column validation rules",
         default=None,
@@ -159,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--fail-on",
+        choices=["warning", "error"],
+        default="warning",
+        help="Severity at or above which the command exits with code 1",
     )
     check.add_argument(
         "--progress",
@@ -535,10 +547,12 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             return 2
 
     if args.minimal:
-        blocking = report.blocking_issues
-        errors = sum(1 for issue in blocking if issue.severity == "error")
-        status = "PASS" if report.status == "pass" else "FAIL"
-        print(f"[{status}] {len(blocking)} issue(s), {errors} error(s).")
+        gated = report.gated_issues(args.fail_on)
+        errors = sum(1 for issue in gated if issue.severity == "error")
+        status = "PASS" if report.exit_code(args.fail_on) == 0 else "FAIL"
+        ignored = len(report.blocking_issues) - len(gated)
+        suffix = f" {ignored} warning(s) below threshold." if ignored else ""
+        print(f"[{status}] {len(gated)} issue(s), {errors} error(s).{suffix}")
     elif args.json:
         import json
 
@@ -584,7 +598,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             return 2
         notice(f"{label} report saved to {path}")
 
-    return 0 if report.status == "pass" else 1
+    return report.exit_code(args.fail_on)
 
 
 def _write_text(path: str, content: str) -> str | None:
@@ -634,19 +648,24 @@ def _cmd_check(args: argparse.Namespace) -> int:
             print(error, file=sys.stderr)
             return 2
 
-    blocking = report.blocking_issues
-    if blocking:
+    gated = report.gated_issues(args.fail_on)
+    if gated:
         if not args.minimal:
             print(report.to_markdown())
-        errors = sum(1 for issue in blocking if issue.severity == "error")
-        summary = f"[FAIL] {len(blocking)} issue(s), {errors} error(s) - check failed."
+        errors = sum(1 for issue in gated if issue.severity == "error")
+        summary = f"[FAIL] {len(gated)} issue(s), {errors} error(s) - check failed."
         print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 
+    ignored = len(report.blocking_issues) - len(gated)
+    warning_note = f" ({ignored} warning(s) below threshold)" if ignored else ""
     if args.minimal:
-        print("[PASS] 0 issue(s).")
+        print(f"[PASS] 0 issue(s).{warning_note}")
     else:
-        print(f"[PASS] Dataset '{args.data}' passed all checks ({report.rows} rows, {report.columns} columns).")
+        print(
+            f"[PASS] Dataset '{args.data}' passed the {args.fail_on} gate "
+            f"({report.rows} rows, {report.columns} columns).{warning_note}"
+        )
     return 0
 
 

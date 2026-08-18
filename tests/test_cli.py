@@ -98,6 +98,22 @@ class TestExitCodes:
         assert main(["audit", str(path), "--minimal"]) == 1
         assert "[FAIL]" in capsys.readouterr().out
 
+    def test_error_gate_allows_warning_only_audit(self, tmp_path, capsys) -> None:
+        path = tmp_path / "missing.csv"
+        pd.DataFrame({"a": [1, None]}).to_csv(path, index=False)
+        assert main(["audit", str(path), "--fail-on", "error", "--minimal"]) == 0
+        assert "below threshold" in capsys.readouterr().out
+
+    def test_check_error_gate_still_fails_errors(self, tmp_path, capsys) -> None:
+        path = tmp_path / "dupes.csv"
+        rules = tmp_path / "rules.json"
+        pd.DataFrame({"a": ["one", "two"]}).to_csv(path, index=False)
+        rules.write_text('{"a": {"dtype": "numeric"}}', encoding="utf-8")
+        assert main(
+            ["check", str(path), "--rules", str(rules), "--fail-on", "error", "--minimal"]
+        ) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
     def test_check_ignores_informational_findings(self, tmp_path, clean_csv, capsys) -> None:
         assert main(["check", clean_csv]) == 0
         assert "[PASS]" in capsys.readouterr().out

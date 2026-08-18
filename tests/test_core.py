@@ -38,6 +38,22 @@ class TestStatus:
         assert report.status == "warn"
         assert len(report.blocking_issues) == 1
 
+    def test_error_gate_can_ignore_warnings(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.extend(
+            [
+                AuditIssue(check="missing", severity="warning", message="x"),
+                AuditIssue(check="schema", severity="error", message="y"),
+            ]
+        )
+        assert [issue.severity for issue in report.gated_issues("error")] == ["error"]
+        assert report.exit_code("error") == 1
+
+    def test_invalid_gate_is_rejected(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        with pytest.raises(ValueError, match="fail_on"):
+            report.exit_code("info")
+
 
 class TestUniqueness:
     def test_counts_every_redundant_row(self) -> None:

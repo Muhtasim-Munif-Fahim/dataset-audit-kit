@@ -430,6 +430,24 @@ class AuditReport:
 
         return [issue for issue in self.issues if issue.severity in {"error", "warning"}]
 
+    def gated_issues(self, fail_on: str = "warning") -> list[AuditIssue]:
+        """Return findings that should fail a quality gate.
+
+        ``warning`` preserves the default behavior where warnings and errors
+        fail.  ``error`` is useful for exploratory or staged pipelines that
+        want to surface warnings without stopping execution.
+        """
+
+        if fail_on not in {"warning", "error"}:
+            raise ValueError("fail_on must be 'warning' or 'error'")
+        severities = {"warning", "error"} if fail_on == "warning" else {"error"}
+        return [issue for issue in self.issues if issue.severity in severities]
+
+    def exit_code(self, fail_on: str = "warning") -> int:
+        """Return the process exit code for a configurable quality gate."""
+
+        return 1 if self.gated_issues(fail_on) else 0
+
     @property
     def quality_score(self) -> int:
         score = 100
