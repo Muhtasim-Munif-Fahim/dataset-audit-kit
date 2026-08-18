@@ -210,6 +210,38 @@ class TestTextPatternRules:
             DatasetAuditor(rules=rules).audit_dataframe(pd.DataFrame({"code": ["A"]}))
 
 
+class TestCardinalityRules:
+    def test_min_and_max_unique_values_are_enforced(self) -> None:
+        rules = ValidationRules.from_dict(
+            {
+                "group": {"min_unique": 3},
+                "code": {"max_unique": 2},
+            }
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"group": ["a", "a", "b"], "code": ["x", "y", "z"]})
+        )
+
+        messages = _messages(report, "rule")
+        assert any("expected at least 3" in message for message in messages)
+        assert any("expected at most 2" in message for message in messages)
+
+    def test_cardinality_bounds_round_trip(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"code": {"min_unique": 1, "max_unique": 4}}
+        )
+        assert rules.to_dict()["code"]["min_unique"] == 1
+        assert rules.to_dict()["code"]["max_unique"] == 4
+
+    def test_cardinality_bounds_must_be_ordered_non_negative_integers(self) -> None:
+        with pytest.raises(ValueError, match="non-negative integer"):
+            ValidationRules.from_dict({"code": {"max_unique": -1}})
+        with pytest.raises(ValueError, match="cannot exceed"):
+            ValidationRules.from_dict(
+                {"code": {"min_unique": 4, "max_unique": 2}}
+            )
+
+
 class TestRendering:
     def test_csv_contains_a_stable_flat_findings_schema(self) -> None:
         report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)

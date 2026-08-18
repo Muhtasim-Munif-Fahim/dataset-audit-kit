@@ -136,6 +136,8 @@ class ColumnRule:
     allowed_values: list[str] | None = None
     max_missing_ratio: float | None = None
     pattern: str | None = None
+    min_unique: int | None = None
+    max_unique: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,23 @@ class ValidationRules:
         """Build rules from a plain dictionary (e.g. loaded from JSON)."""
         column_rules: dict[str, ColumnRule] = {}
         for col_name, col_config in rules.items():
+            unique_bounds: dict[str, int | None] = {}
+            for bound in ("min_unique", "max_unique"):
+                value = col_config.get(bound)
+                if value is not None:
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        raise ValueError(
+                            f"{bound} for column '{col_name}' must be a non-negative integer"
+                        )
+                unique_bounds[bound] = value
+            if (
+                unique_bounds["min_unique"] is not None
+                and unique_bounds["max_unique"] is not None
+                and unique_bounds["min_unique"] > unique_bounds["max_unique"]
+            ):
+                raise ValueError(
+                    f"min_unique cannot exceed max_unique for column '{col_name}'"
+                )
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -163,6 +182,8 @@ class ValidationRules:
                 allowed_values=col_config.get("allowed_values"),
                 max_missing_ratio=col_config.get("max_missing_ratio"),
                 pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
+                min_unique=unique_bounds["min_unique"],
+                max_unique=unique_bounds["max_unique"],
             )
         return cls(columns=column_rules)
 
@@ -237,6 +258,8 @@ class ValidationRules:
                 "allowed_values",
                 "max_missing_ratio",
                 "pattern",
+                "min_unique",
+                "max_unique",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -1574,6 +1597,38 @@ class DatasetAuditor:
                             column=column_name,
                             observed=missing_ratio,
                             threshold=rule.max_missing_ratio,
+                        )
+                    )
+
+            # --- cardinality bounds ---
+            if rule.min_unique is not None or rule.max_unique is not None:
+                unique_count = int(col_data.nunique(dropna=True))
+                if rule.min_unique is not None and unique_count < rule.min_unique:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=(
+                                f"Only {unique_count} unique value(s); expected at least "
+                                f"{rule.min_unique}."
+                            ),
+                            column=column_name,
+                            observed=unique_count,
+                            threshold=rule.min_unique,
+                        )
+                    )
+                if rule.max_unique is not None and unique_count > rule.max_unique:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=(
+                                f"{unique_count} unique value(s); expected at most "
+                                f"{rule.max_unique}."
+                            ),
+                            column=column_name,
+                            observed=unique_count,
+                            threshold=rule.max_unique,
                         )
                     )
 
