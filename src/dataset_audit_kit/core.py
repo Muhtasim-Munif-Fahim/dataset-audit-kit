@@ -141,6 +141,37 @@ class ColumnRule:
 
 
 @dataclass(frozen=True)
+class CrossColumnRule:
+    """A relational constraint between two columns.
+
+    Attributes
+    ----------
+    left : str
+        First column name in the comparison.
+    op : str
+        One of ``"le"``, ``"lt"``, ``"ge"``, ``"gt"``, ``"eq"``, ``"ne"``.
+    right : str
+        Second column name in the comparison.
+    missing_ok : bool
+        When True, rows where either side is missing are skipped instead of
+        being reported as violations.
+    """
+
+    left: str
+    op: str
+    right: str
+    missing_ok: bool = False
+
+    _OPERATORS = frozenset({"le", "lt", "ge", "gt", "eq", "ne"})
+
+    def __post_init__(self) -> None:
+        if self.op not in self._OPERATORS:
+            raise ValueError(
+                f"op must be one of {sorted(self._OPERATORS)}, got '{self.op}'"
+            )
+
+
+@dataclass(frozen=True)
 class ValidationRules:
     """A collection of per-column validation rules.
 
@@ -148,15 +179,26 @@ class ValidationRules:
     ----------
     columns : dict[str, ColumnRule]
         Mapping from column name to its validation rule.
+    cross : tuple[CrossColumnRule, ...]
+        Relational constraints between pairs of columns.
     """
 
     columns: dict[str, ColumnRule] = field(default_factory=dict)
+    cross: tuple[CrossColumnRule, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_dict(cls, rules: dict[str, dict[str, object]]) -> "ValidationRules":
-        """Build rules from a plain dictionary (e.g. loaded from JSON)."""
+        """Build rules from a plain dictionary (e.g. loaded from JSON).
+
+        Per-column contracts live under each column name. Relational
+        constraints are read from an optional ``"cross"`` key holding a list
+        of ``{"left": ..., "op": ..., "right": ...}`` entries.
+        """
         column_rules: dict[str, ColumnRule] = {}
+        raw_cross = rules.get("cross", [])
         for col_name, col_config in rules.items():
+            if col_name == "cross":
+                continue
             unique_bounds: dict[str, int | None] = {}
             for bound in ("min_unique", "max_unique"):
                 value = col_config.get(bound)
@@ -185,7 +227,26 @@ class ValidationRules:
                 min_unique=unique_bounds["min_unique"],
                 max_unique=unique_bounds["max_unique"],
             )
-        return cls(columns=column_rules)
+        cross_rules: list[CrossColumnRule] = []
+        for entry in raw_cross:
+            if not isinstance(entry, dict):
+                raise ValueError("each cross-column rule must be an object")
+            left = entry.get("left")
+            right = entry.get("right")
+            if not isinstance(left, str) or not isinstance(right, str):
+                raise ValueError("cross-column rules need string 'left' and 'right' columns")
+            missing_ok = entry.get("missing_ok", False)
+            if not isinstance(missing_ok, bool):
+                raise ValueError("missing_ok must be a boolean")
+            cross_rules.append(
+                CrossColumnRule(
+                    left=left,
+                    op=str(entry.get("op", "le")),
+                    right=right,
+                    missing_ok=missing_ok,
+                )
+            )
+        return cls(columns=column_rules, cross=tuple(cross_rules))
 
     @classmethod
     def from_json(cls, path: str) -> "ValidationRules":
@@ -265,6 +326,12 @@ class ValidationRules:
                 if value is not None:
                     entry[attr] = value
             result[name] = entry
+        if self.cross:
+            result["cross"] = [
+                {"left": r.left, "op": r.op, "right": r.right}
+                | ({"missing_ok": True} if r.missing_ok else {})
+                for r in self.cross
+            ]
         return result
 
 
@@ -1116,6 +1183,8 @@ class DatasetAuditor:
         progress.advance("rules")
         # Per-column validation rules
         self._apply_rules(data, issues)
+        # Relational constraints between column pairs
+        self._check_cross_rules(data, issues)
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
@@ -1813,8 +1882,76 @@ class DatasetAuditor:
                         )
                     )
 
+    def _check_cross_rules(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Evaluate relational constraints between column pairs."""
+        if self.rules is None or not self.rules.cross:
+            return
+
+        op_names = {
+            "le": ("less than or equal to", lambda a, b: a <= b),
+            "lt": ("less than", lambda a, b: a < b),
+            "ge": ("greater than or equal to", lambda a, b: a >= b),
+            "gt": ("greater than", lambda a, b: a > b),
+            "eq": ("equal to", lambda a, b: a == b),
+            "ne": ("not equal to", lambda a, b: a != b),
+        }
+
+        for rule in self.rules.cross:
+            if rule.left not in data.columns:
+                issues.append(
+                    AuditIssue(
+                        check="cross-rule",
+                        severity="error",
+                        message=(
+                            f"Cross-column rule references missing column "
+                            f"'{rule.left}'."
+                        ),
+                        column=rule.left,
+                    )
+                )
+                continue
+            if rule.right not in data.columns:
+                issues.append(
+                    AuditIssue(
+                        check="cross-rule",
+                        severity="error",
+                        message=(
+                            f"Cross-column rule references missing column "
+                            f"'{rule.right}'."
+                        ),
+                        column=rule.right,
+                    )
+                )
+                continue
+
+            left = pd.to_numeric(data[rule.left], errors="coerce")
+            right = pd.to_numeric(data[rule.right], errors="coerce")
+            if rule.missing_ok:
+                present = left.notna() & right.notna()
+                violations = int((~op_names[rule.op][1](left, right) & present).sum())
+            else:
+                violations = int((~op_names[rule.op][1](left, right)).sum())
+            if violations:
+                issues.append(
+                    AuditIssue(
+                        check="cross-rule",
+                        severity="warning",
+                        message=(
+                            f"{violations} row(s) violate '{rule.left} {rule.op} "
+                            f"{rule.right}'."
+                        ),
+                        column=f"{rule.left},{rule.right}",
+                        observed=violations,
+                    )
+                )
+
     @staticmethod
     def _infer_dtype(series: pd.Series) -> str:
+        """Infer a human-readable type for a series."""
         """Infer a human-readable type for a series."""
         if pd.api.types.is_numeric_dtype(series):
             return "numeric"
