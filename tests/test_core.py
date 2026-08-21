@@ -416,3 +416,47 @@ class TestFileLoading:
             str(current), reference_path=str(reference), delimiter=";"
         )
         assert report.columns == 2
+
+class TestDateFormatRule:
+    def test_reports_unparseable_dates(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_format": "%Y-%m-%d"}}
+        )
+        data = pd.DataFrame({"when": ["2026-01-01", "not-a-date"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        message = _messages(report, "rule")[0]
+        assert "do not parse with date format" in message
+
+    def test_valid_dates_pass(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_format": "%Y-%m-%d"}}
+        )
+        data = pd.DataFrame({"when": ["2026-01-01", "2026-12-31"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        assert _messages(report, "rule") == []
+
+    def test_missing_values_are_skipped(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_format": "%Y-%m-%d"}}
+        )
+        data = pd.DataFrame({"when": [None, "2026-01-01"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        assert _messages(report, "rule") == []
+
+    def test_invalid_format_raises(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_format": "%Q"}}
+        )
+        with pytest.raises(ValueError, match="date_format"):
+            DatasetAuditor(rules=rules).audit_dataframe(
+                pd.DataFrame({"when": ["2026-01-01"]})
+            )
+
+    def test_round_trips_through_json(self, tmp_path) -> None:
+        path = tmp_path / "rules.json"
+        path.write_text(
+            json.dumps({"when": {"date_format": "%Y-%m-%d"}}),
+            encoding="utf-8",
+        )
+        rules = ValidationRules.from_json(str(path))
+        assert rules.columns["when"].date_format == "%Y-%m-%d"

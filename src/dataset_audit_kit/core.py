@@ -127,6 +127,9 @@ class ColumnRule:
         Overrides the global ``missing_threshold`` when set.
     pattern : str | None
         Regular expression that every non-missing string value must fully match.
+    date_format : str | None
+        strptime format that every non-missing string value must parse as a
+        datetime. Useful for guarding date columns stored as text.
     """
 
     name: str
@@ -138,6 +141,7 @@ class ColumnRule:
     pattern: str | None = None
     min_unique: int | None = None
     max_unique: int | None = None
+    date_format: str | None = None
 
 
 @dataclass(frozen=True)
@@ -226,6 +230,11 @@ class ValidationRules:
                 pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
                 min_unique=unique_bounds["min_unique"],
                 max_unique=unique_bounds["max_unique"],
+                date_format=(
+                    str(col_config["date_format"])
+                    if col_config.get("date_format") is not None
+                    else None
+                ),
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -321,6 +330,7 @@ class ValidationRules:
                 "pattern",
                 "min_unique",
                 "max_unique",
+                "date_format",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -1876,6 +1886,37 @@ class DatasetAuditor:
                             message=(
                                 f"{violations} value(s) do not match pattern "
                                 f"'{rule.pattern}'."
+                            ),
+                            column=column_name,
+                            observed=violations,
+                        )
+                    )
+
+            # --- datetime format contract ---
+            if rule.date_format is not None:
+                from datetime import datetime
+
+                try:
+                    datetime.strptime("2000-01-01", rule.date_format)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid date_format for column '{column_name}': {exc}"
+                    ) from exc
+                values = col_data.dropna().astype(str)
+                violations = 0
+                for value in values:
+                    try:
+                        datetime.strptime(value, rule.date_format)
+                    except (ValueError, TypeError):
+                        violations += 1
+                if violations:
+                    issues.append(
+                        AuditIssue(
+                            check="rule",
+                            severity="warning",
+                            message=(
+                                f"{violations} value(s) do not parse with date "
+                                f"format '{rule.date_format}'."
                             ),
                             column=column_name,
                             observed=violations,
