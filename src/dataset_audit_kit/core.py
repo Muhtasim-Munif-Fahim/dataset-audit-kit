@@ -136,6 +136,9 @@ class ColumnRule:
         Maximum number of characters allowed for each non-missing value.
     max_outlier_ratio : float | None
         Maximum fraction of numeric values allowed outside the IQR fences.
+    max_drift : float | None
+        Maximum drift score allowed for this column when a reference dataset is
+        supplied. Overrides the auditor-wide ``drift_threshold``.
     """
 
     name: str
@@ -151,6 +154,7 @@ class ColumnRule:
     min_length: int | None = None
     max_length: int | None = None
     max_outlier_ratio: float | None = None
+    max_drift: float | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +244,16 @@ class ValidationRules:
                     raise ValueError(
                         f"max_outlier_ratio for column '{col_name}' must be between 0 and 1"
                     )
+            max_drift = col_config.get("max_drift")
+            if max_drift is not None:
+                if (
+                    isinstance(max_drift, bool)
+                    or not isinstance(max_drift, (int, float))
+                    or float(max_drift) < 0.0
+                ):
+                    raise ValueError(
+                        f"max_drift for column '{col_name}' must be a non-negative number"
+                    )
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -262,6 +276,7 @@ class ValidationRules:
                     if max_outlier_ratio is not None
                     else None
                 ),
+                max_drift=float(max_drift) if max_drift is not None else None,
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -361,6 +376,7 @@ class ValidationRules:
                 "min_length",
                 "max_length",
                 "max_outlier_ratio",
+                "max_drift",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -2129,15 +2145,21 @@ class DatasetAuditor:
                 score = self._categorical_drift(current.astype(str), baseline.astype(str))
 
             drift_scores[column] = score
-            if score >= self.drift_threshold:
+            rule = self.rules.columns.get(column) if self.rules is not None else None
+            threshold = (
+                rule.max_drift
+                if rule is not None and rule.max_drift is not None
+                else self.drift_threshold
+            )
+            if score >= threshold:
                 issues.append(
                     AuditIssue(
                         check="drift",
                         severity="warning",
-                        message=f"Drift score {score:.3f} exceeds the {self.drift_threshold:.3f} threshold.",
+                        message=f"Drift score {score:.3f} exceeds the {threshold:.3f} threshold.",
                         column=column,
                         observed=score,
-                        threshold=self.drift_threshold,
+                        threshold=threshold,
                     )
                 )
 

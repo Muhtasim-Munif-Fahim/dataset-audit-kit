@@ -518,3 +518,23 @@ class TestDuplicateAllowance:
     def test_duplicate_allowance_must_be_a_fraction(self) -> None:
         with pytest.raises(ValueError, match="max_duplicate_ratio"):
             DatasetAuditor(max_duplicate_ratio=1.01)
+
+
+class TestColumnDriftThresholds:
+    def test_column_rule_can_be_stricter_than_global_drift_threshold(self) -> None:
+        rules = ValidationRules.from_dict({"revenue": {"max_drift": 0.05}})
+        report = DatasetAuditor(drift_threshold=0.20, rules=rules).audit_dataframe(
+            pd.DataFrame({"revenue": [11.0, 11.0]}),
+            reference=pd.DataFrame({"revenue": [10.0, 10.0]}),
+        )
+
+        issue = next(issue for issue in report.issues if issue.check == "drift")
+        assert issue.threshold == 0.05
+        assert "0.050 threshold" in issue.message
+
+    def test_column_drift_threshold_round_trips_and_rejects_negative_values(self) -> None:
+        rules = ValidationRules.from_dict({"revenue": {"max_drift": 0.15}})
+        assert rules.to_dict()["revenue"]["max_drift"] == 0.15
+
+        with pytest.raises(ValueError, match="max_drift"):
+            ValidationRules.from_dict({"revenue": {"max_drift": -0.1}})
