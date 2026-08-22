@@ -481,3 +481,23 @@ class TestStringLengthRules:
 
         with pytest.raises(ValueError, match="min_length cannot exceed max_length"):
             ValidationRules.from_dict({"code": {"min_length": 5, "max_length": 4}})
+
+
+class TestOutlierRatioRules:
+    def test_enforces_configured_iqr_outlier_ratio_without_numeric_bounds(self) -> None:
+        rules = ValidationRules.from_dict({"score": {"max_outlier_ratio": 0.10}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"score": [1, 2, 2, 3, 3, 20]})
+        )
+
+        issue = next(issue for issue in report.issues if issue.column == "score")
+        assert issue.severity == "info"
+        assert issue.threshold == 0.10
+        assert "exceeds allowed 10.0%" in issue.message
+
+    def test_outlier_ratio_round_trips_and_requires_a_fraction(self) -> None:
+        rules = ValidationRules.from_dict({"score": {"max_outlier_ratio": 0.25}})
+        assert rules.to_dict()["score"]["max_outlier_ratio"] == 0.25
+
+        with pytest.raises(ValueError, match="max_outlier_ratio"):
+            ValidationRules.from_dict({"score": {"max_outlier_ratio": 1.1}})

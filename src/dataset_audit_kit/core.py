@@ -134,6 +134,8 @@ class ColumnRule:
         Minimum number of characters allowed for each non-missing value.
     max_length : int | None
         Maximum number of characters allowed for each non-missing value.
+    max_outlier_ratio : float | None
+        Maximum fraction of numeric values allowed outside the IQR fences.
     """
 
     name: str
@@ -148,6 +150,7 @@ class ColumnRule:
     date_format: str | None = None
     min_length: int | None = None
     max_length: int | None = None
+    max_outlier_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,16 @@ class ValidationRules:
                     raise ValueError(
                         f"{lower} cannot exceed {upper} for column '{col_name}'"
                     )
+            max_outlier_ratio = col_config.get("max_outlier_ratio")
+            if max_outlier_ratio is not None:
+                if (
+                    isinstance(max_outlier_ratio, bool)
+                    or not isinstance(max_outlier_ratio, (int, float))
+                    or not 0.0 <= float(max_outlier_ratio) <= 1.0
+                ):
+                    raise ValueError(
+                        f"max_outlier_ratio for column '{col_name}' must be between 0 and 1"
+                    )
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -244,6 +257,11 @@ class ValidationRules:
                 ),
                 min_length=integer_bounds["min_length"],
                 max_length=integer_bounds["max_length"],
+                max_outlier_ratio=(
+                    float(max_outlier_ratio)
+                    if max_outlier_ratio is not None
+                    else None
+                ),
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -342,6 +360,7 @@ class ValidationRules:
                 "date_format",
                 "min_length",
                 "max_length",
+                "max_outlier_ratio",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -1874,8 +1893,12 @@ class DatasetAuditor:
                             )
                         )
 
-            # --- IQR outlier detection ---
-            if rule.min_value is not None or rule.max_value is not None:
+            # --- IQR outlier allowance ---
+            if (
+                rule.max_outlier_ratio is not None
+                or rule.min_value is not None
+                or rule.max_value is not None
+            ):
                 numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
                 if len(numeric) >= 4:
                     q1 = float(numeric.quantile(0.25))
@@ -1888,14 +1911,31 @@ class DatasetAuditor:
                         high_outliers = int((numeric > min(upper_fence, rule.max_value if rule.max_value is not None else upper_fence)).sum())
                         total_outliers = low_outliers + high_outliers
                         total = len(numeric)
-                        if total_outliers > 0 and total_outliers / max(total, 1) > 0.01:
+                        outlier_ratio = total_outliers / max(total, 1)
+                        allowed_ratio = (
+                            rule.max_outlier_ratio
+                            if rule.max_outlier_ratio is not None
+                            else 0.01
+                        )
+                        if total_outliers > 0 and outlier_ratio > allowed_ratio:
+                            if rule.max_outlier_ratio is None:
+                                message = (
+                                    f"{total_outliers} IQR outlier(s) detected "
+                                    f"({outlier_ratio * 100:.1f}% of values)."
+                                )
+                            else:
+                                message = (
+                                    f"IQR outlier ratio {outlier_ratio:.1%} exceeds allowed "
+                                    f"{allowed_ratio:.1%} ({total_outliers} value(s))."
+                                )
                             issues.append(
                                 AuditIssue(
                                     check="rule",
                                     severity="info",
-                                    message=f"{total_outliers} IQR outlier(s) detected ({total_outliers / max(total, 1) * 100:.1f}% of values).",
+                                    message=message,
                                     column=column_name,
                                     observed=total_outliers,
+                                    threshold=allowed_ratio,
                                 )
                             )
 
