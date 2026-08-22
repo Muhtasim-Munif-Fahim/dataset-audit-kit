@@ -1141,12 +1141,16 @@ class DatasetAuditor:
         missing_threshold: float = 0.05,
         drift_threshold: float = 0.20,
         label_min_share: float = 0.05,
+        max_duplicate_ratio: float = 0.0,
         rules: ValidationRules | None = None,
         progress: bool | None = None,
     ) -> None:
+        if not 0.0 <= max_duplicate_ratio <= 1.0:
+            raise ValueError("max_duplicate_ratio must be between 0 and 1")
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
         self.label_min_share = label_min_share
+        self.max_duplicate_ratio = max_duplicate_ratio
         self.rules = rules
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
@@ -1178,13 +1182,18 @@ class DatasetAuditor:
         missingness = self._missingness(data, issues)
         progress.advance("duplicates")
         duplicate_rows = int(data.duplicated().sum())
-        if duplicate_rows:
+        duplicate_ratio = duplicate_rows / max(len(data), 1)
+        if duplicate_rows and duplicate_ratio > self.max_duplicate_ratio:
             issues.append(
                 AuditIssue(
                     check="duplicates",
                     severity="warning",
-                    message=f"{duplicate_rows} duplicate row(s) detected.",
+                    message=(
+                        f"Duplicate ratio {duplicate_ratio:.1%} exceeds allowed "
+                        f"{self.max_duplicate_ratio:.1%} ({duplicate_rows} row(s))."
+                    ),
                     observed=duplicate_rows,
+                    threshold=self.max_duplicate_ratio,
                 )
             )
 

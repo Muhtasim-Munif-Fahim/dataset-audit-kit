@@ -501,3 +501,20 @@ class TestOutlierRatioRules:
 
         with pytest.raises(ValueError, match="max_outlier_ratio"):
             ValidationRules.from_dict({"score": {"max_outlier_ratio": 1.1}})
+
+
+class TestDuplicateAllowance:
+    def test_allows_duplicate_rows_within_configured_ratio(self) -> None:
+        data = pd.DataFrame({"id": [1, 1, 2, 3]})
+
+        allowed = DatasetAuditor(max_duplicate_ratio=0.25).audit_dataframe(data)
+        rejected = DatasetAuditor(max_duplicate_ratio=0.24).audit_dataframe(data)
+
+        assert _messages(allowed, "duplicates") == []
+        issue = next(issue for issue in rejected.issues if issue.check == "duplicates")
+        assert issue.threshold == 0.24
+        assert "exceeds allowed 24.0%" in issue.message
+
+    def test_duplicate_allowance_must_be_a_fraction(self) -> None:
+        with pytest.raises(ValueError, match="max_duplicate_ratio"):
+            DatasetAuditor(max_duplicate_ratio=1.01)
