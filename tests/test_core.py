@@ -460,3 +460,24 @@ class TestDateFormatRule:
         )
         rules = ValidationRules.from_json(str(path))
         assert rules.columns["when"].date_format == "%Y-%m-%d"
+
+
+class TestStringLengthRules:
+    def test_reports_values_outside_configured_length_range(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"code": {"min_length": 2, "max_length": 4}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"code": ["A", "AB", "ABCDE", None]})
+        )
+
+        messages = _messages(report, "rule")
+        assert "1 value(s) shorter than minimum length 2." in messages
+        assert "1 value(s) longer than maximum length 4." in messages
+
+    def test_length_bounds_round_trip_and_validate_order(self) -> None:
+        rules = ValidationRules.from_dict({"code": {"min_length": 2, "max_length": 4}})
+        assert rules.to_dict()["code"] == {"min_length": 2, "max_length": 4}
+
+        with pytest.raises(ValueError, match="min_length cannot exceed max_length"):
+            ValidationRules.from_dict({"code": {"min_length": 5, "max_length": 4}})

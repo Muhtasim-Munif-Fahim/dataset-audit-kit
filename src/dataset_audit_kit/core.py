@@ -130,6 +130,10 @@ class ColumnRule:
     date_format : str | None
         strptime format that every non-missing string value must parse as a
         datetime. Useful for guarding date columns stored as text.
+    min_length : int | None
+        Minimum number of characters allowed for each non-missing value.
+    max_length : int | None
+        Maximum number of characters allowed for each non-missing value.
     """
 
     name: str
@@ -142,6 +146,8 @@ class ColumnRule:
     min_unique: int | None = None
     max_unique: int | None = None
     date_format: str | None = None
+    min_length: int | None = None
+    max_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -203,23 +209,24 @@ class ValidationRules:
         for col_name, col_config in rules.items():
             if col_name == "cross":
                 continue
-            unique_bounds: dict[str, int | None] = {}
-            for bound in ("min_unique", "max_unique"):
+            integer_bounds: dict[str, int | None] = {}
+            for bound in ("min_unique", "max_unique", "min_length", "max_length"):
                 value = col_config.get(bound)
                 if value is not None:
                     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                         raise ValueError(
                             f"{bound} for column '{col_name}' must be a non-negative integer"
                         )
-                unique_bounds[bound] = value
-            if (
-                unique_bounds["min_unique"] is not None
-                and unique_bounds["max_unique"] is not None
-                and unique_bounds["min_unique"] > unique_bounds["max_unique"]
-            ):
-                raise ValueError(
-                    f"min_unique cannot exceed max_unique for column '{col_name}'"
-                )
+                integer_bounds[bound] = value
+            for lower, upper in (("min_unique", "max_unique"), ("min_length", "max_length")):
+                if (
+                    integer_bounds[lower] is not None
+                    and integer_bounds[upper] is not None
+                    and integer_bounds[lower] > integer_bounds[upper]
+                ):
+                    raise ValueError(
+                        f"{lower} cannot exceed {upper} for column '{col_name}'"
+                    )
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -228,13 +235,15 @@ class ValidationRules:
                 allowed_values=col_config.get("allowed_values"),
                 max_missing_ratio=col_config.get("max_missing_ratio"),
                 pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
-                min_unique=unique_bounds["min_unique"],
-                max_unique=unique_bounds["max_unique"],
+                min_unique=integer_bounds["min_unique"],
+                max_unique=integer_bounds["max_unique"],
                 date_format=(
                     str(col_config["date_format"])
                     if col_config.get("date_format") is not None
                     else None
                 ),
+                min_length=integer_bounds["min_length"],
+                max_length=integer_bounds["max_length"],
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -331,6 +340,8 @@ class ValidationRules:
                 "min_unique",
                 "max_unique",
                 "date_format",
+                "min_length",
+                "max_length",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -1796,6 +1807,42 @@ class DatasetAuditor:
                             threshold=rule.max_unique,
                         )
                     )
+
+            # --- text length bounds ---
+            if rule.min_length is not None or rule.max_length is not None:
+                lengths = col_data.dropna().astype(str).str.len()
+                if rule.min_length is not None:
+                    violations = int((lengths < rule.min_length).sum())
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"{violations} value(s) shorter than minimum length "
+                                    f"{rule.min_length}."
+                                ),
+                                column=column_name,
+                                observed=violations,
+                                threshold=rule.min_length,
+                            )
+                        )
+                if rule.max_length is not None:
+                    violations = int((lengths > rule.max_length).sum())
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"{violations} value(s) longer than maximum length "
+                                    f"{rule.max_length}."
+                                ),
+                                column=column_name,
+                                observed=violations,
+                                threshold=rule.max_length,
+                            )
+                        )
 
             # --- numeric bounds ---
             if rule.min_value is not None or rule.max_value is not None:
