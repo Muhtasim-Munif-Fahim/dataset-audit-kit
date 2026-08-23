@@ -1161,6 +1161,7 @@ class DatasetAuditor:
         min_rows: int | None = None,
         max_rows: int | None = None,
         max_missing_cells: int | None = None,
+        max_columns: int | None = None,
         rules: ValidationRules | None = None,
         progress: bool | None = None,
     ) -> None:
@@ -1170,6 +1171,7 @@ class DatasetAuditor:
             ("min_rows", min_rows),
             ("max_rows", max_rows),
             ("max_missing_cells", max_missing_cells),
+            ("max_columns", max_columns),
         ):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer or None")
@@ -1182,6 +1184,7 @@ class DatasetAuditor:
         self.min_rows = min_rows
         self.max_rows = max_rows
         self.max_missing_cells = max_missing_cells
+        self.max_columns = max_columns
         self.rules = rules
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
@@ -1227,6 +1230,20 @@ class DatasetAuditor:
                     message=f"Dataset has {row_count} row(s); expected at most {self.max_rows}.",
                     observed=row_count,
                     threshold=self.max_rows,
+                )
+            )
+        column_count = len(data.columns)
+        if self.max_columns is not None and column_count > self.max_columns:
+            issues.append(
+                AuditIssue(
+                    check="columns",
+                    severity="warning",
+                    message=(
+                        f"Dataset has {column_count} column(s); allowed at most "
+                        f"{self.max_columns}."
+                    ),
+                    observed=column_count,
+                    threshold=self.max_columns,
                 )
             )
         progress = self._progress_reporter(data)
@@ -1317,7 +1334,7 @@ class DatasetAuditor:
 
         return AuditReport(
             rows=int(len(data)),
-            columns=int(len(data.columns)),
+            columns=column_count,
             duplicate_rows=duplicate_rows,
             missing_cells=missing_cells,
             missingness=missingness,

@@ -562,3 +562,14 @@ class TestMissingCellAllowance:
         issue = next(issue for issue in report.issues if issue.check == "missing_cells")
         assert issue.observed == 2
         assert issue.threshold == 1
+
+
+class TestColumnWidthAllowance:
+    def test_warns_when_dataset_exceeds_column_budget(self) -> None:
+        report = DatasetAuditor(max_columns=2).audit_dataframe(
+            pd.DataFrame({"a": [1], "b": [2], "c": [3]})
+        )
+
+        issue = next(issue for issue in report.issues if issue.check == "columns")
+        assert issue.observed == 3
+        assert issue.threshold == 2
