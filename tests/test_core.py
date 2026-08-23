@@ -573,3 +573,16 @@ class TestColumnWidthAllowance:
         issue = next(issue for issue in report.issues if issue.check == "columns")
         assert issue.observed == 3
         assert issue.threshold == 2
+
+
+class TestColumnOrderContract:
+    def test_can_require_expected_column_order(self) -> None:
+        report = DatasetAuditor().audit_dataframe(
+            pd.DataFrame({"b": [1], "a": [2]}),
+            expected_columns=["a", "b"],
+            require_column_order=True,
+        )
+
+        assert _messages(report, "schema") == [
+            "Column order does not match the expected schema contract."
+        ]

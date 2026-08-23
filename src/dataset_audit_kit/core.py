@@ -1204,6 +1204,7 @@ class DatasetAuditor:
         reference: pd.DataFrame | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        require_column_order: bool = False,
         unique_columns: Sequence[str] | None = None,
         unique_together: Sequence[Sequence[str]] | None = None,
     ) -> AuditReport:
@@ -1288,7 +1289,9 @@ class DatasetAuditor:
 
         progress.advance("schema")
         if expected_columns is not None:
-            self._check_schema(data, expected_columns, issues)
+            self._check_schema(
+                data, expected_columns, issues, require_column_order=require_column_order
+            )
 
         progress.advance("uniqueness")
         if unique_columns is not None:
@@ -1351,6 +1354,7 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        require_column_order: bool = False,
         unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
         delimiter: str | None = None,
@@ -1360,6 +1364,7 @@ class DatasetAuditor:
             reference_path=reference_path,
             label_column=label_column,
             expected_columns=expected_columns,
+            require_column_order=require_column_order,
             unique_together=unique_together,
             encoding=encoding,
             delimiter=delimiter,
@@ -1372,6 +1377,7 @@ class DatasetAuditor:
         reference_path: str | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        require_column_order: bool = False,
         unique_columns: Sequence[str] | None = None,
         unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
@@ -1395,6 +1401,7 @@ class DatasetAuditor:
             reference=reference,
             label_column=label_column,
             expected_columns=expected_columns,
+            require_column_order=require_column_order,
             unique_columns=unique_columns,
             unique_together=unique_together,
         )
@@ -1406,6 +1413,7 @@ class DatasetAuditor:
         reference_path: str | Path | None = None,
         label_column: str | None = None,
         expected_columns: Sequence[str] | None = None,
+        require_column_order: bool = False,
         unique_columns: Sequence[str] | None = None,
         unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
@@ -1424,6 +1432,7 @@ class DatasetAuditor:
                 reference_path=str(reference_path) if reference_path is not None else None,
                 label_column=label_column,
                 expected_columns=expected_columns,
+                require_column_order=require_column_order,
                 unique_columns=unique_columns,
                 unique_together=unique_together,
                 encoding=encoding,
@@ -1673,6 +1682,8 @@ class DatasetAuditor:
         data: pd.DataFrame,
         expected_columns: Sequence[str],
         issues: list[AuditIssue],
+        *,
+        require_column_order: bool = False,
     ) -> None:
         expected = list(expected_columns)
         observed = list(data.columns)
@@ -1694,6 +1705,14 @@ class DatasetAuditor:
                     check="schema",
                     severity="warning",
                     message=f"Unexpected columns present: {', '.join(extra)}.",
+                )
+            )
+        if require_column_order and not missing and not extra and observed != expected:
+            issues.append(
+                AuditIssue(
+                    check="schema",
+                    severity="error",
+                    message="Column order does not match the expected schema contract.",
                 )
             )
 
