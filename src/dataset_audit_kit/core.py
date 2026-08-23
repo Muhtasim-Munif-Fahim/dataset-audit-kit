@@ -1158,15 +1158,24 @@ class DatasetAuditor:
         drift_threshold: float = 0.20,
         label_min_share: float = 0.05,
         max_duplicate_ratio: float = 0.0,
+        min_rows: int | None = None,
+        max_rows: int | None = None,
         rules: ValidationRules | None = None,
         progress: bool | None = None,
     ) -> None:
         if not 0.0 <= max_duplicate_ratio <= 1.0:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
+        for name, value in (("min_rows", min_rows), ("max_rows", max_rows)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if min_rows is not None and max_rows is not None and min_rows > max_rows:
+            raise ValueError("min_rows must not exceed max_rows")
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
         self.label_min_share = label_min_share
         self.max_duplicate_ratio = max_duplicate_ratio
+        self.min_rows = min_rows
+        self.max_rows = max_rows
         self.rules = rules
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
@@ -1193,6 +1202,27 @@ class DatasetAuditor:
             raise TypeError("data must be a pandas.DataFrame")
 
         issues: list[AuditIssue] = []
+        row_count = len(data)
+        if self.min_rows is not None and row_count < self.min_rows:
+            issues.append(
+                AuditIssue(
+                    check="rows",
+                    severity="error",
+                    message=f"Dataset has {row_count} row(s); expected at least {self.min_rows}.",
+                    observed=row_count,
+                    threshold=self.min_rows,
+                )
+            )
+        if self.max_rows is not None and row_count > self.max_rows:
+            issues.append(
+                AuditIssue(
+                    check="rows",
+                    severity="error",
+                    message=f"Dataset has {row_count} row(s); expected at most {self.max_rows}.",
+                    observed=row_count,
+                    threshold=self.max_rows,
+                )
+            )
         progress = self._progress_reporter(data)
         progress.advance("missingness")
         missingness = self._missingness(data, issues)

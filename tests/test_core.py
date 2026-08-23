@@ -538,3 +538,16 @@ class TestColumnDriftThresholds:
 
         with pytest.raises(ValueError, match="max_drift"):
             ValidationRules.from_dict({"revenue": {"max_drift": -0.1}})
+
+
+class TestRowCountContracts:
+    def test_enforces_minimum_and_maximum_dataset_rows(self) -> None:
+        too_small = DatasetAuditor(min_rows=3).audit_dataframe(pd.DataFrame({"x": [1, 2]}))
+        too_large = DatasetAuditor(max_rows=2).audit_dataframe(pd.DataFrame({"x": [1, 2, 3]}))
+
+        assert "expected at least 3" in _messages(too_small, "rows")[0]
+        assert "expected at most 2" in _messages(too_large, "rows")[0]
+
+    def test_rejects_inverted_row_count_contract(self) -> None:
+        with pytest.raises(ValueError, match="min_rows"):
+            DatasetAuditor(min_rows=4, max_rows=3)
