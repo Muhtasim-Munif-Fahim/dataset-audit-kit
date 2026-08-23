@@ -1160,12 +1160,17 @@ class DatasetAuditor:
         max_duplicate_ratio: float = 0.0,
         min_rows: int | None = None,
         max_rows: int | None = None,
+        max_missing_cells: int | None = None,
         rules: ValidationRules | None = None,
         progress: bool | None = None,
     ) -> None:
         if not 0.0 <= max_duplicate_ratio <= 1.0:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
-        for name, value in (("min_rows", min_rows), ("max_rows", max_rows)):
+        for name, value in (
+            ("min_rows", min_rows),
+            ("max_rows", max_rows),
+            ("max_missing_cells", max_missing_cells),
+        ):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer or None")
         if min_rows is not None and max_rows is not None and min_rows > max_rows:
@@ -1176,6 +1181,7 @@ class DatasetAuditor:
         self.max_duplicate_ratio = max_duplicate_ratio
         self.min_rows = min_rows
         self.max_rows = max_rows
+        self.max_missing_cells = max_missing_cells
         self.rules = rules
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
@@ -1226,6 +1232,23 @@ class DatasetAuditor:
         progress = self._progress_reporter(data)
         progress.advance("missingness")
         missingness = self._missingness(data, issues)
+        missing_cells = int(data.isna().sum().sum())
+        if (
+            self.max_missing_cells is not None
+            and missing_cells > self.max_missing_cells
+        ):
+            issues.append(
+                AuditIssue(
+                    check="missing_cells",
+                    severity="warning",
+                    message=(
+                        f"Dataset has {missing_cells} missing cell(s); allowed at most "
+                        f"{self.max_missing_cells}."
+                    ),
+                    observed=missing_cells,
+                    threshold=self.max_missing_cells,
+                )
+            )
         progress.advance("duplicates")
         duplicate_rows = int(data.duplicated().sum())
         duplicate_ratio = duplicate_rows / max(len(data), 1)
@@ -1296,7 +1319,7 @@ class DatasetAuditor:
             rows=int(len(data)),
             columns=int(len(data.columns)),
             duplicate_rows=duplicate_rows,
-            missing_cells=int(data.isna().sum().sum()),
+            missing_cells=missing_cells,
             missingness=missingness,
             column_profiles=column_profiles,
             label_distribution=label_distribution,

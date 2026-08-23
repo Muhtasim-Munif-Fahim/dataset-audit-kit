@@ -551,3 +551,14 @@ class TestRowCountContracts:
     def test_rejects_inverted_row_count_contract(self) -> None:
         with pytest.raises(ValueError, match="min_rows"):
             DatasetAuditor(min_rows=4, max_rows=3)
+
+
+class TestMissingCellAllowance:
+    def test_enforces_global_missing_cell_allowance(self) -> None:
+        report = DatasetAuditor(max_missing_cells=1).audit_dataframe(
+            pd.DataFrame({"a": [1, None], "b": [None, 2]})
+        )
+
+        issue = next(issue for issue in report.issues if issue.check == "missing_cells")
+        assert issue.observed == 2
+        assert issue.threshold == 1
