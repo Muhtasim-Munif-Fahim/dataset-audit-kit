@@ -150,6 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write flat CSV findings for CI or spreadsheet consumers",
         default=None,
     )
+    audit.add_argument(
+        "--sample-rows",
+        type=int,
+        default=None,
+        help="Audit a random sample of this many rows instead of the whole file",
+    )
+    audit.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed that makes --sample-rows reproducible",
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -516,6 +528,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             expected_columns=_parse_columns(args.expected_columns),
             unique_columns=_parse_columns(args.unique_columns),
             unique_together=_parse_unique_groups(args.unique_together),
+            sample_rows=args.sample_rows,
+            sample_seed=args.seed,
         )
     else:
         report = auditor.audit_file(
@@ -527,6 +541,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             unique_together=_parse_unique_groups(args.unique_together),
             encoding=getattr(args, "encoding", None),
             delimiter=getattr(args, "delimiter", None),
+            sample_rows=args.sample_rows,
+            sample_seed=args.seed,
         )
 
     # With --json or --minimal the output is meant to be consumed by another

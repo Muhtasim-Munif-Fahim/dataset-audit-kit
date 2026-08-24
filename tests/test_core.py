@@ -768,3 +768,33 @@ class TestWeightedRiskScoring:
         auditor = DatasetAuditor(severity_weights={"missingness": 25.0})
         payload = json.loads(auditor.audit_dataframe(data).to_json())
         assert payload["risk_score"] == 12.5
+class TestSeededSampleAudit:
+    def test_a_sample_of_the_requested_size_is_reported(self) -> None:
+        data = pd.DataFrame({"id": range(50), "value": ["x"] * 50})
+        report = DatasetAuditor().audit_dataframe(data, sample_rows=10, sample_seed=7)
+        assert report.rows == 10
+        sampling = [i for i in report.issues if i.check == "sampling"]
+        assert len(sampling) == 1
+        assert sampling[0].severity == "info"
+        assert "seed 7" in sampling[0].message
+
+    def test_the_same_seed_reproduces_the_same_sample(self) -> None:
+        data = pd.DataFrame({"id": range(50)})
+        first = DatasetAuditor().audit_dataframe(data, sample_rows=10, sample_seed=3)
+        second = DatasetAuditor().audit_dataframe(data, sample_rows=10, sample_seed=3)
+        assert first.column_profiles == second.column_profiles
+        assert [i.message for i in first.issues] == [i.message for i in second.issues]
+
+    def test_no_sampling_notice_when_the_file_fits(self) -> None:
+        data = pd.DataFrame({"id": range(5)})
+        report = DatasetAuditor().audit_dataframe(data, sample_rows=10, sample_seed=1)
+        assert report.rows == 5
+        assert not [i for i in report.issues if i.check == "sampling"]
+
+    def test_sample_rows_must_be_positive(self) -> None:
+        with pytest.raises(ValueError):
+            DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}), sample_rows=0)
+
+    def test_a_seed_without_a_sample_size_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}), sample_seed=1)

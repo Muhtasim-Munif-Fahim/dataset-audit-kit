@@ -1248,11 +1248,45 @@ class DatasetAuditor:
         require_column_order: bool = False,
         unique_columns: Sequence[str] | None = None,
         unique_together: Sequence[Sequence[str]] | None = None,
+        sample_rows: int | None = None,
+        sample_seed: int | None = None,
     ) -> AuditReport:
         if not isinstance(data, pd.DataFrame):
             raise TypeError("data must be a pandas.DataFrame")
+        if sample_rows is not None and (
+            isinstance(sample_rows, bool)
+            or not isinstance(sample_rows, int)
+            or sample_rows < 1
+        ):
+            raise ValueError("sample_rows must be a positive integer")
+        if sample_seed is not None and (
+            isinstance(sample_seed, bool) or not isinstance(sample_seed, int)
+        ):
+            raise ValueError("sample_seed must be an integer")
+        if sample_seed is not None and sample_rows is None:
+            raise ValueError("sample_seed requires sample_rows")
 
         issues: list[AuditIssue] = []
+
+        original_rows = len(data)
+        if sample_rows is not None and original_rows > sample_rows:
+            data = data.sample(n=sample_rows, random_state=sample_seed)
+            issues.append(
+                AuditIssue(
+                    check="sampling",
+                    severity="info",
+                    message=(
+                        f"Audited a random sample of {sample_rows} of "
+                        f"{original_rows} row(s)"
+                        + (
+                            f" (seed {sample_seed})."
+                            if sample_seed is not None
+                            else "."
+                        )
+                    ),
+                )
+            )
+
         row_count = len(data)
         if self.min_rows is not None and row_count < self.min_rows:
             issues.append(
@@ -1449,6 +1483,8 @@ class DatasetAuditor:
         unique_together: Sequence[Sequence[str]] | None = None,
         encoding: str | None = None,
         delimiter: str | None = None,
+        sample_rows: int | None = None,
+        sample_seed: int | None = None,
     ) -> AuditReport:
         """Audit a dataset on disk.
 
@@ -1471,6 +1507,8 @@ class DatasetAuditor:
             require_column_order=require_column_order,
             unique_columns=unique_columns,
             unique_together=unique_together,
+            sample_rows=sample_rows,
+            sample_seed=sample_seed,
         )
 
     def audit_many(

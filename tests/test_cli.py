@@ -175,3 +175,15 @@ class TestOtherSubcommands:
     def test_subcommand_runs(self, clean_csv, argv, capsys) -> None:
         assert main([argv[0], clean_csv, *argv[1:]]) == 0
         assert capsys.readouterr().out
+class TestSampledCliAudit:
+    def test_sample_flag_reports_the_sampled_row_count(
+        self, tmp_path, clean_frame, capsys
+    ) -> None:
+        big = clean_frame.iloc[[i % 4 for i in range(40)]].reset_index(drop=True)
+        big["id"] = range(40)
+        path = tmp_path / "big.csv"
+        big.to_csv(path, index=False)
+        code = main(["audit", str(path), "--json", "--sample-rows", "10", "--seed", "5"])
+        assert code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["rows"] == 10
