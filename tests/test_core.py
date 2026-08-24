@@ -648,3 +648,68 @@ class TestColumnOrderContract:
         assert _messages(report, "schema") == [
             "Column order does not match the expected schema contract."
         ]
+class TestDuplicateColumnDetection:
+    def test_copies_of_a_column_are_flagged_once_per_pair(self) -> None:
+        data = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "copy": [1, 2, 3],
+                "other": ["a", "b", "c"],
+            }
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        flagged = [i for i in report.issues if i.check == "duplicate_columns"]
+        assert len(flagged) == 1
+        assert flagged[0].column == "id,copy"
+
+    def test_one_differing_value_breaks_the_match(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": [1.0, 2.0, 3.0],
+                "b": [1.0, 2.0, 3.5],
+            }
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        assert not [i for i in report.issues if i.check == "duplicate_columns"]
+
+    def test_matching_gaps_still_count_as_identical(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": pd.Series([None, "x", None], dtype=object),
+                "b": pd.Series([None, "x", None], dtype=object),
+            }
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        checks = [i.check for i in report.issues]
+        assert "duplicate_columns" in checks
+
+    def test_entirely_missing_columns_are_not_compared(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": pd.Series([None, None], dtype=object),
+                "b": pd.Series([None, None], dtype=object),
+                "c": ["p", "q"],
+            }
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        assert not [i for i in report.issues if i.check == "duplicate_columns"]
+
+    def test_three_copies_yield_three_pairs(self) -> None:
+        values = [7, 8, 9]
+        data = pd.DataFrame(
+            {"a": values, "b": list(values), "c": list(values)}
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        flagged = [i for i in report.issues if i.check == "duplicate_columns"]
+        assert len(flagged) == 3
+
+    def test_text_column_copies_are_caught_without_correlation(self) -> None:
+        data = pd.DataFrame(
+            {
+                "city": ["berlin", "tokyo", "lima"],
+                "clone": ["berlin", "tokyo", "lima"],
+            }
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        checks = [i.check for i in report.issues]
+        assert "duplicate_columns" in checks

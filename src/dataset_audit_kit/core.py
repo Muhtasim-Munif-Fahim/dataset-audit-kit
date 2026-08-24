@@ -1348,6 +1348,9 @@ class DatasetAuditor:
             data, issues, correlation_threshold=self.redundancy_threshold
         )
 
+        # Identical-content columns that correlation cannot see
+        self._check_duplicate_columns(data, issues)
+
         progress.close()
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
@@ -2439,6 +2442,44 @@ class DatasetAuditor:
                                 threshold=correlation_threshold,
                             )
                         )
+
+    @staticmethod
+    def _check_duplicate_columns(
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Flag column pairs that hold identical values cell for cell.
+
+        Correlation redundancy only sees numeric columns, so a copied text or
+        categorical column slips past it; an exact content match is caught
+        here regardless of dtype. Columns that are entirely missing are
+        skipped, since two empty columns say nothing about each other.
+        """
+
+        if len(data) == 0:
+            return
+        for i in range(len(data.columns)):
+            left = data.iloc[:, i]
+            if left.notna().sum() == 0:
+                continue
+            for j in range(i + 1, len(data.columns)):
+                right = data.iloc[:, j]
+                if right.notna().sum() == 0:
+                    continue
+                same = (left == right) | (left.isna() & right.isna())
+                if bool(same.all()):
+                    name_i, name_j = str(data.columns[i]), str(data.columns[j])
+                    issues.append(
+                        AuditIssue(
+                            check="duplicate_columns",
+                            severity="warning",
+                            message=(
+                                f"Columns '{name_i}' and '{name_j}' contain "
+                                "identical values."
+                            ),
+                            column=f"{name_i},{name_j}",
+                        )
+                    )
 
     @staticmethod
     def _schema_diff(
