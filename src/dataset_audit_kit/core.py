@@ -1156,6 +1156,7 @@ class DatasetAuditor:
         *,
         missing_threshold: float = 0.05,
         drift_threshold: float = 0.20,
+        redundancy_threshold: float = 0.95,
         label_min_share: float = 0.05,
         max_duplicate_ratio: float = 0.0,
         min_rows: int | None = None,
@@ -1165,6 +1166,8 @@ class DatasetAuditor:
         rules: ValidationRules | None = None,
         progress: bool | None = None,
     ) -> None:
+        if not 0.0 <= redundancy_threshold <= 1.0:
+            raise ValueError("redundancy_threshold must be between 0 and 1")
         if not 0.0 <= max_duplicate_ratio <= 1.0:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
         for name, value in (
@@ -1179,6 +1182,7 @@ class DatasetAuditor:
             raise ValueError("min_rows must not exceed max_rows")
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
+        self.redundancy_threshold = redundancy_threshold
         self.label_min_share = label_min_share
         self.max_duplicate_ratio = max_duplicate_ratio
         self.min_rows = min_rows
@@ -1329,7 +1333,9 @@ class DatasetAuditor:
 
         progress.advance("redundancy")
         # Redundancy / collinearity check
-        self._check_redundancy(data, issues, correlation_threshold=0.95)
+        self._check_redundancy(
+            data, issues, correlation_threshold=self.redundancy_threshold
+        )
 
         progress.close()
 

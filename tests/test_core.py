@@ -575,6 +575,26 @@ class TestColumnWidthAllowance:
         assert issue.threshold == 2
 
 
+class TestRedundancyThreshold:
+    def test_perfect_correlation_is_flagged_with_the_default_threshold(self) -> None:
+        data = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [2.0, 4.0, 6.0]})
+        report = DatasetAuditor().audit_dataframe(data)
+
+        issue = next(issue for issue in report.issues if issue.check == "redundancy")
+        assert issue.threshold == 0.95
+
+    def test_lowering_the_threshold_catches_weaker_correlations(self) -> None:
+        data = pd.DataFrame({"a": [1, 2, 3, 4, 5, 6], "b": [1, 3, 2, 5, 4, 6]})
+
+        assert _messages(DatasetAuditor().audit_dataframe(data), "redundancy") == []
+        flagged = DatasetAuditor(redundancy_threshold=0.85).audit_dataframe(data)
+        assert len(_messages(flagged, "redundancy")) == 1
+
+    def test_threshold_must_be_a_fraction(self) -> None:
+        with pytest.raises(ValueError, match="redundancy_threshold"):
+            DatasetAuditor(redundancy_threshold=1.01)
+
+
 class TestColumnOrderContract:
     def test_can_require_expected_column_order(self) -> None:
         report = DatasetAuditor().audit_dataframe(
