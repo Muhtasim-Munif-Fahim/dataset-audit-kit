@@ -6,6 +6,7 @@ import csv
 import html
 import io
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass, field
@@ -20,6 +21,15 @@ COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
 
 #: Row count above which an audit reports progress unless told otherwise.
 PROGRESS_ROW_THRESHOLD = 100_000
+
+#: Weight a check carries in the risk score when not configured explicitly.
+DEFAULT_RISK_WEIGHT = 10.0
+
+#: Fraction of its weight a warning contributes, relative to an error.
+RISK_WARNING_FACTOR = 0.5
+
+#: Upper bound of the aggregate risk score.
+MAX_RISK_SCORE = 100.0
 
 #: Ordered names of the audit phases, used for progress reporting.
 _AUDIT_PHASES = (
@@ -550,6 +560,7 @@ class AuditReport:
     drift_scores: dict[str, float] = field(default_factory=dict)
     column_profiles: dict[str, dict[str, object]] = field(default_factory=dict)
     issues: list[AuditIssue] = field(default_factory=list)
+    risk_score: float = 0.0
 
     @property
     def status(self) -> str:
@@ -596,6 +607,7 @@ class AuditReport:
         return {
             "status": self.status,
             "quality_score": self.quality_score,
+            "risk_score": self.risk_score,
             "rows": self.rows,
             "columns": self.columns,
             "duplicate_rows": self.duplicate_rows,
@@ -1175,6 +1187,7 @@ class DatasetAuditor:
         max_missing_cells: int | None = None,
         max_columns: int | None = None,
         rules: ValidationRules | None = None,
+        severity_weights: dict[str, float] | None = None,
         progress: bool | None = None,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
@@ -1191,6 +1204,18 @@ class DatasetAuditor:
                 raise ValueError(f"{name} must be a non-negative integer or None")
         if min_rows is not None and max_rows is not None and min_rows > max_rows:
             raise ValueError("min_rows must not exceed max_rows")
+        validated_weights: dict[str, float] = {}
+        for check, weight in (severity_weights or {}).items():
+            if (
+                isinstance(weight, bool)
+                or not isinstance(weight, (int, float))
+                or not math.isfinite(float(weight))
+                or float(weight) < 0.0
+            ):
+                raise ValueError(
+                    f"severity weight for '{check}' must be a non-negative finite number"
+                )
+            validated_weights[str(check)] = float(weight)
         self.missing_threshold = missing_threshold
         self.drift_threshold = drift_threshold
         self.redundancy_threshold = redundancy_threshold
@@ -1201,6 +1226,7 @@ class DatasetAuditor:
         self.max_missing_cells = max_missing_cells
         self.max_columns = max_columns
         self.rules = rules
+        self.severity_weights = validated_weights
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
 
@@ -1355,7 +1381,7 @@ class DatasetAuditor:
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
 
-        return AuditReport(
+        report = AuditReport(
             rows=int(len(data)),
             columns=column_count,
             duplicate_rows=duplicate_rows,
@@ -1366,6 +1392,27 @@ class DatasetAuditor:
             drift_scores=all_drift_scores,
             issues=issues,
         )
+        report.risk_score = self._risk_score(issues)
+        return report
+
+    def _risk_score(self, issues: Sequence[AuditIssue]) -> float:
+        """Fold every blocking finding into one bounded 0-100 score.
+
+        An error contributes its check's weight in full and a warning half of
+        it; ``info`` findings describe the dataset rather than fault it, so
+        they add nothing. Checks without an explicit weight count at
+        :data:`DEFAULT_RISK_WEIGHT`, and the total is capped so a pathological
+        dataset cannot leave the fixed range.
+        """
+
+        total = 0.0
+        for issue in issues:
+            if issue.severity == "info":
+                continue
+            weight = self.severity_weights.get(issue.check, DEFAULT_RISK_WEIGHT)
+            multiplier = 1.0 if issue.severity == "error" else RISK_WARNING_FACTOR
+            total += weight * multiplier
+        return round(min(total, MAX_RISK_SCORE), 1)
 
     def audit_csv(
         self,

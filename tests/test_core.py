@@ -713,3 +713,58 @@ class TestDuplicateColumnDetection:
         report = DatasetAuditor().audit_dataframe(data)
         checks = [i.check for i in report.issues]
         assert "duplicate_columns" in checks
+class TestWeightedRiskScoring:
+    def test_default_weights_score_an_error_at_double_a_warning(self) -> None:
+        data = pd.DataFrame({"n": [-1.0, -2.0]})
+        auditor = DatasetAuditor(
+            min_rows=5,
+            rules=ValidationRules.from_dict({"n": {"min_value": 0.0}}),
+        )
+        report = auditor.audit_dataframe(data)
+        checks = {(i.check, i.severity) for i in report.issues}
+        assert ("rows", "error") in checks
+        assert ("rule", "warning") in checks
+        assert report.risk_score == 15.0
+
+    def test_configured_weights_rescale_their_check(self) -> None:
+        data = pd.DataFrame({"n": [-1.0, -2.0]})
+        auditor = DatasetAuditor(
+            min_rows=5,
+            severity_weights={"rule": 30.0},
+            rules=ValidationRules.from_dict({"n": {"min_value": 0.0}}),
+        )
+        report = auditor.audit_dataframe(data)
+        assert report.risk_score == 25.0
+
+    def test_the_score_is_capped_at_one_hundred(self) -> None:
+        data = pd.DataFrame({"n": [-1.0, -2.0]})
+        auditor = DatasetAuditor(
+            min_rows=5,
+            severity_weights={"rule": 400.0},
+            rules=ValidationRules.from_dict({"n": {"min_value": 0.0}}),
+        )
+        assert auditor.audit_dataframe(data).risk_score == 100.0
+
+    def test_info_findings_add_no_risk(self) -> None:
+        data = pd.DataFrame({"n": [1.0, 2.0, 3.0, 4.0, 100.0]})
+        rules = ValidationRules.from_dict({"n": {"max_outlier_ratio": 0.0}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        severities = {i.severity for i in report.issues}
+        assert "info" in severities
+        blocking = [i for i in report.issues if i.severity != "info"]
+        if not blocking:
+            assert report.risk_score == 0.0
+
+    def test_weights_must_be_finite_non_negative_numbers(self) -> None:
+        with pytest.raises(ValueError):
+            DatasetAuditor(severity_weights={"drift": -1.0})
+        with pytest.raises(ValueError):
+            DatasetAuditor(severity_weights={"drift": float("nan")})
+        with pytest.raises(ValueError):
+            DatasetAuditor(severity_weights={"drift": True})
+
+    def test_the_json_report_carries_the_risk_score(self) -> None:
+        data = pd.DataFrame({"id": [1, 2, 3, 4], "m": [1.0, None, None, None]})
+        auditor = DatasetAuditor(severity_weights={"missingness": 25.0})
+        payload = json.loads(auditor.audit_dataframe(data).to_json())
+        assert payload["risk_score"] == 12.5
