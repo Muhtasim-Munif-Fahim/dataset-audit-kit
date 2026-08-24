@@ -227,6 +227,48 @@ class TestTextPatternRules:
             DatasetAuditor(rules=rules).audit_dataframe(pd.DataFrame({"code": ["A"]}))
 
 
+class TestAllowedValueCaseHandling:
+    def test_case_differences_are_unexpected_by_default(self) -> None:
+        rules = ValidationRules.from_dict({"grade": {"allowed_values": ["A", "B"]}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"grade": ["a", "B"]})
+        )
+        assert "Unexpected values found: a." in _messages(report, "rule")[0]
+
+    def test_ignore_case_accepts_mixed_case_values(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"grade": {"allowed_values": ["A", "B"], "ignore_case": True}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"grade": ["a", "b", None]})
+        )
+        assert _messages(report, "rule") == []
+
+    def test_ignore_case_still_reports_genuinely_unknown_values(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"grade": {"allowed_values": ["A"], "ignore_case": True}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"grade": ["a", "Z"]})
+        )
+        assert "Unexpected values found: Z." in _messages(report, "rule")[0]
+
+    def test_ignore_case_must_be_a_boolean(self) -> None:
+        with pytest.raises(ValueError, match="ignore_case"):
+            ValidationRules.from_dict(
+                {"grade": {"allowed_values": ["A"], "ignore_case": "yes"}}
+            )
+
+    def test_ignore_case_round_trips_only_when_enabled(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"grade": {"allowed_values": ["A"], "ignore_case": True}}
+        )
+        assert rules.to_dict()["grade"]["ignore_case"] is True
+
+        plain = ValidationRules.from_dict({"code": {"pattern": "[A-Z]+"}})
+        assert "ignore_case" not in plain.to_dict()["code"]
+
+
 class TestCardinalityRules:
     def test_min_and_max_unique_values_are_enforced(self) -> None:
         rules = ValidationRules.from_dict(

@@ -122,6 +122,8 @@ class ColumnRule:
         Maximum allowed value (numeric columns only).
     allowed_values : list[str] | None
         Set of allowed values (categorical/string columns only).
+    ignore_case : bool
+        When True, allowed-value membership ignores letter case.
     max_missing_ratio : float | None
         Maximum allowed fraction of missing values for this column.
         Overrides the global ``missing_threshold`` when set.
@@ -146,6 +148,7 @@ class ColumnRule:
     min_value: float | None = None
     max_value: float | None = None
     allowed_values: list[str] | None = None
+    ignore_case: bool = False
     max_missing_ratio: float | None = None
     pattern: str | None = None
     min_unique: int | None = None
@@ -244,6 +247,11 @@ class ValidationRules:
                     raise ValueError(
                         f"max_outlier_ratio for column '{col_name}' must be between 0 and 1"
                     )
+            ignore_case = col_config.get("ignore_case", False)
+            if not isinstance(ignore_case, bool):
+                raise ValueError(
+                    f"ignore_case for column '{col_name}' must be a boolean"
+                )
             max_drift = col_config.get("max_drift")
             if max_drift is not None:
                 if (
@@ -260,6 +268,7 @@ class ValidationRules:
                 min_value=col_config.get("min_value"),
                 max_value=col_config.get("max_value"),
                 allowed_values=col_config.get("allowed_values"),
+                ignore_case=ignore_case,
                 max_missing_ratio=col_config.get("max_missing_ratio"),
                 pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
                 min_unique=integer_bounds["min_unique"],
@@ -381,6 +390,8 @@ class ValidationRules:
                 value = getattr(rule, attr)
                 if value is not None:
                     entry[attr] = value
+            if rule.ignore_case:
+                entry["ignore_case"] = True
             result[name] = entry
         if self.cross:
             result["cross"] = [
@@ -2063,7 +2074,17 @@ class DatasetAuditor:
             if rule.allowed_values is not None:
                 allowed_set = set(str(v) for v in rule.allowed_values)
                 actual_values = col_data.dropna().astype(str).unique()
-                unexpected = [str(v) for v in actual_values if str(v) not in allowed_set]
+                if rule.ignore_case:
+                    folded = {value.casefold() for value in allowed_set}
+                    unexpected = [
+                        str(value)
+                        for value in actual_values
+                        if str(value).casefold() not in folded
+                    ]
+                else:
+                    unexpected = [
+                        str(value) for value in actual_values if str(value) not in allowed_set
+                    ]
                 if unexpected:
                     issues.append(
                         AuditIssue(
