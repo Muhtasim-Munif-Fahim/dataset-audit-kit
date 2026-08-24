@@ -163,6 +163,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Random seed that makes --sample-rows reproducible",
     )
 
+    audit_glob = subparsers.add_parser(
+        "audit-glob",
+        help="Audit every dataset matching a glob pattern and print a rollup",
+    )
+    audit_glob.add_argument(
+        "pattern",
+        help="Glob such as 'data/*.csv'; quote it so the shell leaves it intact",
+    )
+    audit_glob.add_argument(
+        "--reference",
+        help="Path to the reference dataset used for every file",
+        default=None,
+    )
+    audit_glob.add_argument("--label-column", help="Name of the label column", default=None)
+    audit_glob.add_argument(
+        "--expected-columns",
+        help="Comma-separated list of expected columns",
+        default=None,
+    )
+    audit_glob.add_argument(
+        "--missing-threshold",
+        type=float,
+        default=0.05,
+        help="Fraction of missing values allowed before warning",
+    )
+    audit_glob.add_argument(
+        "--drift-threshold",
+        type=float,
+        default=0.20,
+        help="Drift score threshold before warning",
+    )
+    audit_glob.add_argument(
+        "--rules",
+        help="Path to a JSON file with per-column validation rules",
+        default=None,
+    )
+    audit_glob.add_argument(
+        "--fail-on",
+        choices=["warning", "error"],
+        default="warning",
+        help="Severity at or above which the command exits with code 1",
+    )
+    audit_glob.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the batch report as JSON instead of the rollup table",
+    )
+
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
     check.add_argument("--rules", help="Path to a JSON file with per-column validation rules", default=None)
@@ -632,6 +680,51 @@ def _write_text(path: str, content: str) -> str | None:
     except OSError as exc:
         return f"Cannot write report to '{path}': {exc}"
     return None
+
+
+def _cmd_audit_glob(args: argparse.Namespace) -> int:
+    """Audit every dataset matched by a glob pattern and roll the results up."""
+
+    import glob
+
+    matches = sorted(glob.glob(args.pattern))
+    if not matches:
+        print(f"No files match pattern '{args.pattern}'.", file=sys.stderr)
+        return 2
+
+    auditor = DatasetAuditor(
+        missing_threshold=args.missing_threshold,
+        drift_threshold=args.drift_threshold,
+        rules=ValidationRules.from_json(args.rules) if args.rules else None,
+    )
+    batch = auditor.audit_many(
+        matches,
+        reference_path=args.reference,
+        label_column=args.label_column,
+        expected_columns=_parse_columns(args.expected_columns),
+        encoding=getattr(args, "encoding", None),
+        delimiter=getattr(args, "delimiter", None),
+    )
+
+    if args.json:
+        print(batch.to_json())
+    else:
+        width = max(len(path) for path in batch.reports)
+        for path, report in batch.reports.items():
+            gated = report.gated_issues(args.fail_on)
+            status = "PASS" if not gated else "FAIL"
+            print(f"{path:<{width}}  [{status}] {len(gated)} issue(s)")
+        failed = len(batch.gated_paths(args.fail_on))
+        summary = f"rollup: {len(batch.reports)} file(s), {failed} failed"
+        counts = batch.issue_counts()
+        if counts:
+            worst = ", ".join(
+                f"{check}={count}" for check, count in list(counts.items())[:5]
+            )
+            summary += f"; worst checks: {worst}"
+        print(summary)
+
+    return batch.exit_code(args.fail_on)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -1297,6 +1390,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
     if args.command == "audit":
         return _cmd_audit(args)
+    elif args.command == "audit-glob":
+        return _cmd_audit_glob(args)
     elif args.command == "check":
         return _cmd_check(args)
     elif args.command == "columns":

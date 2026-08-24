@@ -187,3 +187,39 @@ class TestSampledCliAudit:
         assert code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["rows"] == 10
+class TestGlobRollup:
+    @pytest.fixture
+    def mixed_dir(self, tmp_path, clean_frame):
+        clean = tmp_path / "good.csv"
+        clean_frame.to_csv(clean, index=False)
+        dirty = tmp_path / "bad.csv"
+        pd.DataFrame(
+            {
+                "a": [1.0, None, None],
+                "b": [4.0, 5.0, 6.0],
+            }
+        ).to_csv(dirty, index=False)
+        return tmp_path
+
+    def test_rollup_lists_each_file_and_the_worst_checks(self, mixed_dir, capsys) -> None:
+        code = main(["audit-glob", str(mixed_dir / "*.csv")])
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "[PASS] 0 issue(s)" in out
+        assert "[FAIL]" in out
+        assert "rollup: 2 file(s), 1 failed" in out
+        assert "worst checks: missingness=1" in out
+
+    def test_a_clean_directory_exits_zero(self, tmp_path, clean_frame, capsys) -> None:
+        (tmp_path / "only.csv").write_text("x\ny\n")
+        assert main(["audit-glob", str(tmp_path / "*.csv")]) == 0
+        assert "rollup: 1 file(s), 0 failed" in capsys.readouterr().out
+
+    def test_no_matches_report_cleanly(self, tmp_path, capsys) -> None:
+        assert main(["audit-glob", str(tmp_path / "*.parquet")]) == 2
+        assert "No files match" in capsys.readouterr().err
+
+    def test_json_mode_stays_parseable(self, mixed_dir, capsys) -> None:
+        assert main(["audit-glob", str(mixed_dir / "*.csv"), "--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload["files"]) == {str(mixed_dir / "bad.csv"), str(mixed_dir / "good.csv")}

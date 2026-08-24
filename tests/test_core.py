@@ -798,3 +798,26 @@ class TestSeededSampleAudit:
     def test_a_seed_without_a_sample_size_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             DatasetAuditor().audit_dataframe(pd.DataFrame({"a": [1]}), sample_seed=1)
+class TestBatchIssueCounts:
+    def test_counts_aggregate_across_files_by_check(self) -> None:
+        first = AuditReport(
+            rows=1,
+            columns=1,
+            duplicate_rows=0,
+            missing_cells=0,
+            issues=[
+                AuditIssue(check="missingness", severity="warning", message="m"),
+                AuditIssue(check="missingness", severity="warning", message="m2"),
+            ],
+        )
+        second = AuditReport(
+            rows=1,
+            columns=1,
+            duplicate_rows=0,
+            missing_cells=0,
+            issues=[
+                AuditIssue(check="duplicates", severity="warning", message="d"),
+            ],
+        )
+        batch = BatchAuditReport(reports={"a.csv": first, "b.csv": second})
+        assert batch.issue_counts() == {"missingness": 2, "duplicates": 1}

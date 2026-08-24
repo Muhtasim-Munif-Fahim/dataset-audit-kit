@@ -1162,6 +1162,19 @@ class BatchAuditReport:
     def exit_code(self, fail_on: str = "warning") -> int:
         return 1 if self.gated_paths(fail_on) else 0
 
+    def issue_counts(self) -> dict[str, int]:
+        """Count blocking findings by check across every file in the batch.
+
+        The rollup is what a caller scanning twenty files actually wants
+        first: which checks fire at all, and how loudly.
+        """
+
+        counts: dict[str, int] = {}
+        for report in self.reports.values():
+            for issue in report.blocking_issues:
+                counts[issue.check] = counts.get(issue.check, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "status": self.status,
