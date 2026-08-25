@@ -56,6 +56,39 @@ class TestStatus:
             report.exit_code("info")
 
 
+class TestWhitespaceValueCheck:
+    def test_padded_values_are_flagged_when_enabled(self) -> None:
+        data = pd.DataFrame({"name": [" ann", "bo", "cy ", "di"]})
+        report = DatasetAuditor(whitespace_check=True).audit_dataframe(data)
+        messages = _messages(report, "whitespace")
+        assert len(messages) == 1
+        assert "leading or trailing" in messages[0]
+        issue = next(i for i in report.issues if i.check == "whitespace")
+        assert issue.observed == 2
+
+    def test_invisible_characters_are_flagged(self) -> None:
+        data = pd.DataFrame({"name": ["ann\u200b", "bo"]})
+        report = DatasetAuditor(whitespace_check=True).audit_dataframe(data)
+        messages = _messages(report, "whitespace")
+        assert len(messages) == 1
+        assert "invisible" in messages[0]
+
+    def test_clean_text_stays_silent(self) -> None:
+        data = pd.DataFrame({"name": ["ann", "bo"]})
+        report = DatasetAuditor(whitespace_check=True).audit_dataframe(data)
+        assert _messages(report, "whitespace") == []
+
+    def test_numeric_columns_are_ignored(self) -> None:
+        data = pd.DataFrame({"n": [1.0, 2.0]})
+        report = DatasetAuditor(whitespace_check=True).audit_dataframe(data)
+        assert _messages(report, "whitespace") == []
+
+    def test_the_check_is_off_by_default(self) -> None:
+        data = pd.DataFrame({"name": [" ann", "bo"]})
+        report = DatasetAuditor().audit_dataframe(data)
+        assert _messages(report, "whitespace") == []
+
+
 class TestUniqueness:
     def test_counts_every_redundant_row(self) -> None:
         # One value repeated three times leaves two redundant rows, and a value

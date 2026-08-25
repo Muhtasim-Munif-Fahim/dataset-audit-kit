@@ -31,6 +31,22 @@ RISK_WARNING_FACTOR = 0.5
 #: Upper bound of the aggregate risk score.
 MAX_RISK_SCORE = 100.0
 
+#: Unicode characters that are invisible on screen yet split groupby keys
+#: and join matches when they ride along inside text values.
+INVISIBLE_CHARACTERS = (
+    "\u200b",  # zero-width space
+    "\u200c",  # zero-width non-joiner
+    "\u200d",  # zero-width joiner
+    "\u2060",  # word joiner
+    "\ufeff",  # byte-order mark
+    "\u00ad",  # soft hyphen
+    "\u200e",  # left-to-right mark
+    "\u200f",  # right-to-left mark
+)
+
+#: Pattern matching any single invisible character.
+INVISIBLE_CHAR_PATTERN = "[" + "".join(INVISIBLE_CHARACTERS) + "]"
+
 #: Ordered names of the audit phases, used for progress reporting.
 _AUDIT_PHASES = (
     "missingness",
@@ -41,6 +57,7 @@ _AUDIT_PHASES = (
     "label balance",
     "drift",
     "rules",
+    "whitespace",
     "profiles",
     "redundancy",
 )
@@ -1202,6 +1219,7 @@ class DatasetAuditor:
         rules: ValidationRules | None = None,
         severity_weights: dict[str, float] | None = None,
         progress: bool | None = None,
+        whitespace_check: bool = False,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -1242,6 +1260,7 @@ class DatasetAuditor:
         self.severity_weights = validated_weights
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
+        self.whitespace_check = whitespace_check
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -1411,6 +1430,10 @@ class DatasetAuditor:
         self._apply_rules(data, issues)
         # Relational constraints between column pairs
         self._check_cross_rules(data, issues)
+
+        progress.advance("whitespace")
+        if self.whitespace_check:
+            self._check_whitespace_values(data, issues)
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
@@ -1794,6 +1817,54 @@ class DatasetAuditor:
                 )
             else:
                 seen.setdefault(lowered, name)
+
+    def _check_whitespace_values(
+        self, data: pd.DataFrame, issues: list[AuditIssue]
+    ) -> None:
+        """Flag text values damaged by padding or invisible characters.
+
+        These characters survive copy-paste from spreadsheets and web forms;
+        only textual columns are scanned, since numeric parsing rejects the
+        padding on its own.
+        """
+
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
+            if not (
+                isinstance(col.dtype, pd.CategoricalDtype)
+                or col.dtype == object
+                or pd.api.types.is_string_dtype(col)
+            ):
+                continue
+            values = col.dropna().astype(str)
+            if values.empty:
+                continue
+            padded = int((values != values.str.strip()).sum())
+            if padded:
+                issues.append(
+                    AuditIssue(
+                        check="whitespace",
+                        severity="warning",
+                        message=f"{padded} value(s) have leading or trailing whitespace.",
+                        column=str(column),
+                        observed=padded,
+                    )
+                )
+            mask = values.str.contains(INVISIBLE_CHAR_PATTERN, regex=True)
+            invisible = int(mask.sum())
+            if invisible:
+                issues.append(
+                    AuditIssue(
+                        check="whitespace",
+                        severity="warning",
+                        message=(
+                            f"{invisible} value(s) contain invisible characters "
+                            "such as zero-width spaces."
+                        ),
+                        column=str(column),
+                        observed=invisible,
+                    )
+                )
 
     def _check_schema(
         self,

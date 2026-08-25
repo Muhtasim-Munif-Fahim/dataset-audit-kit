@@ -80,6 +80,25 @@ class TestAuditOutput:
         assert "Cannot write report" in capsys.readouterr().err
 
 
+class TestWhitespaceFlag:
+    def test_padding_fails_only_when_enabled(self, tmp_path, capsys) -> None:
+        path = tmp_path / "padded.csv"
+        pd.DataFrame({"name": [" ann", "bo"]}).to_csv(path, index=False)
+        assert main(["audit", str(path), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "whitespace"]
+        assert main(["audit", str(path), "--json", "--check-whitespace"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert [i for i in payload["issues"] if i["check"] == "whitespace"]
+
+    def test_check_gate_counts_whitespace_findings(self, tmp_path, capsys) -> None:
+        path = tmp_path / "invisible.csv"
+        pd.DataFrame({"name": ["\u200bann", "bo"]}).to_csv(path, index=False)
+        assert main(["check", str(path)]) == 0
+        assert main(["check", str(path), "--check-whitespace"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+
 class TestExitCodes:
     def test_informational_findings_do_not_fail_the_audit(self, tmp_path, capsys) -> None:
         current = tmp_path / "cur.csv"

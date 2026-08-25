@@ -162,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Random seed that makes --sample-rows reproducible",
     )
+    audit.add_argument(
+        "--check-whitespace",
+        action="store_true",
+        help="Flag values padded with whitespace or carrying invisible characters",
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -231,6 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["warning", "error"],
         default="warning",
         help="Severity at or above which the command exits with code 1",
+    )
+    check.add_argument(
+        "--check-whitespace",
+        action="store_true",
+        help="Flag values padded with whitespace or carrying invisible characters",
     )
     check.add_argument(
         "--progress",
@@ -519,6 +529,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         drift_threshold=args.drift_threshold,
         rules=ValidationRules.from_json(args.rules) if args.rules else None,
         progress=getattr(args, "progress", None),
+        whitespace_check=args.check_whitespace,
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -734,6 +745,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         drift_threshold=args.drift_threshold,
         rules=ValidationRules.from_json(args.rules) if args.rules else None,
         progress=getattr(args, "progress", None),
+        whitespace_check=args.check_whitespace,
     )
     report = auditor.audit_file(
         args.data,
