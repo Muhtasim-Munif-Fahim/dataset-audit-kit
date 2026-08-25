@@ -242,3 +242,46 @@ class TestGlobRollup:
         assert main(["audit-glob", str(mixed_dir / "*.csv"), "--json"]) == 1
         payload = json.loads(capsys.readouterr().out)
         assert set(payload["files"]) == {str(mixed_dir / "bad.csv"), str(mixed_dir / "good.csv")}
+
+
+class TestRiskGate:
+    def test_check_tolerates_warnings_until_they_pile_up(self, tmp_path, capsys) -> None:
+        path = tmp_path / "gaps.csv"
+        pd.DataFrame({"a": [1.0, None], "b": [2.0, None]}).to_csv(path, index=False)
+        base = ["check", str(path), "--fail-on", "error"]
+        assert main(base + ["--minimal"]) == 0
+        assert main(base + ["--minimal", "--max-risk", "9"]) == 1
+        assert "risk score" in capsys.readouterr().out
+        assert main(base + ["--minimal", "--max-risk", "10"]) == 0
+
+    def test_audit_applies_the_same_ceiling(self, tmp_path) -> None:
+        path = tmp_path / "gaps.csv"
+        pd.DataFrame({"a": [1.0, None]}).to_csv(path, index=False)
+        flags = ["--fail-on", "error", "--minimal"]
+        assert main(["audit", str(path), *flags, "--max-risk", "4"]) == 1
+        assert main(["audit", str(path), *flags, "--max-risk", "5"]) == 0
+
+    def test_audit_glob_marks_files_over_the_ceiling(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"a": [1.0, None]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"a": [1.0, 2.0]}).to_csv(tmp_path / "b.csv", index=False)
+        code = main(
+            [
+                "audit-glob",
+                str(tmp_path / "*.csv"),
+                "--fail-on",
+                "error",
+                "--max-risk",
+                "4",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "[FAIL]" in out and "[PASS]" in out and "risk" in out
+        assert code == 1
+
+    def test_a_negative_ceiling_is_refused_as_a_bad_argument(self, tmp_path, capsys) -> None:
+        path = tmp_path / "gaps.csv"
+        pd.DataFrame({"a": [1.0, 2.0]}).to_csv(path, index=False)
+        with pytest.raises(SystemExit) as excinfo:
+            main(["check", str(path), "--max-risk", "-1"])
+        assert excinfo.value.code == 2
+        assert "non-negative" in capsys.readouterr().err

@@ -854,3 +854,45 @@ class TestBatchIssueCounts:
         )
         batch = BatchAuditReport(reports={"a.csv": first, "b.csv": second})
         assert batch.issue_counts() == {"missingness": 2, "duplicates": 1}
+
+
+class TestRiskScoreGate:
+    @staticmethod
+    def _warning_report(count: int) -> AuditReport:
+        report = AuditReport(
+            rows=4,
+            columns=2,
+            duplicate_rows=0,
+            missing_cells=2 * count,
+            issues=[
+                AuditIssue(check="missingness", severity="warning", message=f"w{i}")
+                for i in range(count)
+            ],
+        )
+        # Default-weight warnings contribute 5 points each to the score.
+        report.risk_score = 5.0 * count
+        return report
+
+    def test_a_score_past_the_ceiling_fails_despite_the_error_gate(self) -> None:
+        report = self._warning_report(3)
+        assert report.exit_code("error") == 0
+        assert report.exit_code("error", max_risk=10.0) == 1
+
+    def test_a_score_at_the_ceiling_still_passes(self) -> None:
+        assert self._warning_report(3).exit_code("error", max_risk=15.0) == 0
+
+    def test_findings_still_fail_without_reaching_the_ceiling(self) -> None:
+        report = self._warning_report(3)
+        assert report.exit_code("warning", max_risk=100.0) == 1
+
+    def test_a_negative_ceiling_is_rejected(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        with pytest.raises(ValueError, match="max_risk"):
+            report.exit_code("warning", max_risk=-1)
+
+    def test_the_batch_gate_applies_the_ceiling_to_every_file(self) -> None:
+        clean = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        heavy = self._warning_report(3)
+        batch = BatchAuditReport(reports={"a.csv": clean, "b.csv": heavy})
+        assert batch.exit_code("error", max_risk=10.0) == 1
+        assert batch.exit_code("error", max_risk=20.0) == 0

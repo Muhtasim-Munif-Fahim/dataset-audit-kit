@@ -167,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Flag values padded with whitespace or carrying invisible characters",
     )
+    audit.add_argument(
+        "--max-risk",
+        type=_non_negative_float,
+        default=None,
+        help="Exit with code 1 when the weighted risk score exceeds this ceiling",
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -209,6 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["warning", "error"],
         default="warning",
         help="Severity at or above which the command exits with code 1",
+    )
+    audit_glob.add_argument(
+        "--max-risk",
+        type=_non_negative_float,
+        default=None,
+        help="Exit with code 1 when any file's weighted risk score exceeds this ceiling",
     )
     audit_glob.add_argument(
         "--json",
@@ -274,6 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--csv-out",
         help="Write flat CSV findings for CI or spreadsheet consumers",
         default=None,
+    )
+    check.add_argument(
+        "--max-risk",
+        type=_non_negative_float,
+        default=None,
+        help="Exit with code 1 when the weighted risk score exceeds this ceiling",
     )
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
@@ -468,6 +486,15 @@ def _parse_columns(raw: str | None) -> Sequence[str] | None:
         return None
     columns = [part.strip() for part in raw.split(",") if part.strip()]
     return columns or None
+
+
+def _non_negative_float(text: str) -> float:
+    """Parse an argparse value that must be zero or positive."""
+
+    value = float(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return value
 
 
 def _parse_unique_groups(raw: Sequence[str] | None) -> list[list[str]] | None:
@@ -673,7 +700,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             return 2
         notice(f"{label} report saved to {path}")
 
-    return report.exit_code(args.fail_on)
+    return report.exit_code(args.fail_on, max_risk=args.max_risk)
 
 
 def _write_text(path: str, content: str) -> str | None:
@@ -723,8 +750,15 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
         width = max(len(path) for path in batch.reports)
         for path, report in batch.reports.items():
             gated = report.gated_issues(args.fail_on)
-            status = "PASS" if not gated else "FAIL"
-            print(f"{path:<{width}}  [{status}] {len(gated)} issue(s)")
+            over_risk = (
+                args.max_risk is not None
+                and report.risk_score > args.max_risk
+            )
+            status = "FAIL" if gated or over_risk else "PASS"
+            detail = f"{len(gated)} issue(s)"
+            if over_risk:
+                detail += f", risk {report.risk_score} > {args.max_risk}"
+            print(f"{path:<{width}}  [{status}] {detail}")
         failed = len(batch.gated_paths(args.fail_on))
         summary = f"rollup: {len(batch.reports)} file(s), {failed} failed"
         counts = batch.issue_counts()
@@ -735,7 +769,7 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
             summary += f"; worst checks: {worst}"
         print(summary)
 
-    return batch.exit_code(args.fail_on)
+    return batch.exit_code(args.fail_on, max_risk=args.max_risk)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -770,11 +804,18 @@ def _cmd_check(args: argparse.Namespace) -> int:
             return 2
 
     gated = report.gated_issues(args.fail_on)
-    if gated:
+    over_risk = args.max_risk is not None and report.risk_score > args.max_risk
+    if gated or over_risk:
         if not args.minimal:
             print(report.to_markdown())
-        errors = sum(1 for issue in gated if issue.severity == "error")
-        summary = f"[FAIL] {len(gated)} issue(s), {errors} error(s) - check failed."
+        if over_risk and not gated:
+            summary = (
+                f"[FAIL] risk score {report.risk_score} exceeds the "
+                f"--max-risk gate of {args.max_risk}."
+            )
+        else:
+            errors = sum(1 for issue in gated if issue.severity == "error")
+            summary = f"[FAIL] {len(gated)} issue(s), {errors} error(s) - check failed."
         print(summary if args.minimal else "\n" + summary, flush=True)
         return 1
 

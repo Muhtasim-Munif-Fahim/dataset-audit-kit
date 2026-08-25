@@ -564,6 +564,20 @@ class DatasetBaseline:
         return issues
 
 
+def _checked_max_risk(max_risk: float | None) -> float | None:
+    """Validate a risk-score ceiling handed to an exit-code gate."""
+
+    if max_risk is None:
+        return None
+    if (
+        isinstance(max_risk, bool)
+        or not isinstance(max_risk, (int, float))
+        or max_risk < 0
+    ):
+        raise ValueError("max_risk must be a non-negative number")
+    return float(max_risk)
+
+
 @dataclass
 class AuditReport:
     """Structured output from a dataset audit."""
@@ -605,9 +619,20 @@ class AuditReport:
         severities = {"warning", "error"} if fail_on == "warning" else {"error"}
         return [issue for issue in self.issues if issue.severity in severities]
 
-    def exit_code(self, fail_on: str = "warning") -> int:
-        """Return the process exit code for a configurable quality gate."""
+    def exit_code(
+        self, fail_on: str = "warning", *, max_risk: float | None = None
+    ) -> int:
+        """Return the process exit code for a configurable quality gate.
 
+        ``max_risk`` adds a weighted-score ceiling: the run fails when the
+        risk score exceeds it even though every individual finding sits
+        below ``fail_on``. Staged pipelines use it to tolerate scattered
+        warnings but stop once they accumulate.
+        """
+
+        ceiling = _checked_max_risk(max_risk)
+        if ceiling is not None and self.risk_score > ceiling:
+            return 1
         return 1 if self.gated_issues(fail_on) else 0
 
     @property
@@ -1176,7 +1201,14 @@ class BatchAuditReport:
 
         return [path for path, report in self.reports.items() if report.gated_issues(fail_on)]
 
-    def exit_code(self, fail_on: str = "warning") -> int:
+    def exit_code(
+        self, fail_on: str = "warning", *, max_risk: float | None = None
+    ) -> int:
+        ceiling = _checked_max_risk(max_risk)
+        if ceiling is not None and any(
+            report.risk_score > ceiling for report in self.reports.values()
+        ):
+            return 1
         return 1 if self.gated_paths(fail_on) else 0
 
     def issue_counts(self) -> dict[str, int]:
