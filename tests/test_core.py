@@ -896,3 +896,75 @@ class TestRiskScoreGate:
         batch = BatchAuditReport(reports={"a.csv": clean, "b.csv": heavy})
         assert batch.exit_code("error", max_risk=10.0) == 1
         assert batch.exit_code("error", max_risk=20.0) == 0
+class TestNamedRuleProfiles:
+    """Reusable named rule sets stored inside one rules file."""
+
+    @pytest.fixture
+    def profiles_path(self, tmp_path):
+        path = tmp_path / "rules.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "strict": {"age": {"dtype": "numeric", "min_value": 0}},
+                        "loose": {"age": {"dtype": "numeric"}},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_profile_key_selects_one_rule_set(self, profiles_path: str) -> None:
+        rules = ValidationRules.from_json(profiles_path, profile="strict")
+        assert list(rules.columns) == ["age"]
+        assert rules.columns["age"].min_value == 0
+
+    def test_flat_files_load_unchanged(self, tmp_path) -> None:
+        path = tmp_path / "flat.json"
+        path.write_text('{"age": {"dtype": "numeric"}}', encoding="utf-8")
+        assert list(ValidationRules.from_json(str(path)).columns) == ["age"]
+
+    def test_a_profiles_file_demands_a_choice(self, profiles_path: str) -> None:
+        with pytest.raises(ValueError, match=r"loose, strict"):
+            ValidationRules.from_json(profiles_path)
+
+    def test_unknown_profile_lists_the_available_names(self, profiles_path: str) -> None:
+        with pytest.raises(ValueError, match="'tight' not found; available profiles: loose, strict"):
+            ValidationRules.from_json(profiles_path, profile="tight")
+
+    def test_naming_a_profile_on_a_flat_file_is_rejected(self, tmp_path) -> None:
+        path = tmp_path / "flat.json"
+        path.write_text('{"age": {"dtype": "numeric"}}', encoding="utf-8")
+        with pytest.raises(ValueError, match="no profiles section"):
+            ValidationRules.from_json(str(path), profile="strict")
+
+    def test_profiles_section_must_map_names_to_objects(self, tmp_path) -> None:
+        path = tmp_path / "bad.json"
+        path.write_text('{"profiles": ["strict"]}', encoding="utf-8")
+        with pytest.raises(ValueError, match="mapping profile names"):
+            ValidationRules.from_json(str(path))
+
+    def test_selected_rules_drive_the_audit(self, tmp_path) -> None:
+        data = pd.DataFrame({"age": [5, 200]})
+        path = tmp_path / "rules.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "adults_only": {"age": {"min_value": 18}},
+                        "any_age": {"age": {"dtype": "numeric"}},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        strict = DatasetAuditor(
+            rules=ValidationRules.from_json(str(path), profile="adults_only")
+        ).audit_dataframe(data)
+        assert len(_messages(strict, "rule")) == 1
+
+        relaxed = DatasetAuditor(
+            rules=ValidationRules.from_json(str(path), profile="any_age")
+        ).audit_dataframe(data)
+        assert _messages(relaxed, "rule") == []

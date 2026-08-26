@@ -336,12 +336,44 @@ class ValidationRules:
         return cls(columns=column_rules, cross=tuple(cross_rules))
 
     @classmethod
-    def from_json(cls, path: str) -> "ValidationRules":
-        """Load rules from a JSON file."""
+    def from_json(cls, path: str, *, profile: str | None = None) -> "ValidationRules":
+        """Load rules from a JSON file.
+
+        A file may hold several named rule sets under a top-level
+        ``"profiles"`` object; ``profile`` picks one of them. A file without
+        that section is one flat rule set and must not name a profile.
+        """
         import json
         with open(path, "r", encoding="utf-8") as f:
-            raw: dict[str, dict[str, object]] = json.load(f)
-        return cls.from_dict(raw)
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("rules file must contain a JSON object")
+        profiles = raw.get("profiles")
+        if profiles is None:
+            if profile is not None:
+                raise ValueError(
+                    f"profile '{profile}' was requested, but the rules file "
+                    "has no profiles section"
+                )
+            return cls.from_dict(raw)
+        if not isinstance(profiles, dict) or not profiles:
+            raise ValueError(
+                "'profiles' must be an object mapping profile names to rule sets"
+            )
+        available = ", ".join(sorted(str(name) for name in profiles))
+        if profile is None:
+            raise ValueError(
+                f"rules file defines named profiles ({available}); "
+                "pass --profile to choose one"
+            )
+        if profile not in profiles:
+            raise ValueError(
+                f"profile '{profile}' not found; available profiles: {available}"
+            )
+        selected = profiles[profile]
+        if not isinstance(selected, dict):
+            raise ValueError(f"profile '{profile}' must contain rule objects")
+        return cls.from_dict(selected)
 
     @classmethod
     def infer(

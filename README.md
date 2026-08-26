@@ -156,6 +156,29 @@ Rules are checked per-column for:
 - **Allowed values** — `allowed_values` for categorical columns
 - **Missing ratio** — `max_missing_ratio` (overrides the global threshold per column)
 
+### Named Profiles
+
+One rules file can hold several reusable rule sets under a top-level `profiles` object. Pick one at run time with `--profile`:
+
+```json
+{
+  "profiles": {
+    "strict": {
+      "age": {"dtype": "numeric", "min_value": 0, "max_value": 120}
+    },
+    "loose": {
+      "age": {"dtype": "numeric"}
+    }
+  }
+}
+```
+
+```bash
+dataset-audit-kit audit data.csv --rules rules.json --profile strict
+```
+
+`audit`, `check`, and `audit-glob` all accept `--profile`. Running against a profiles file without `--profile` fails with a list of the available names, so a CI job never audits against the wrong contract by accident.
+
 ## Demo
 
 The repository includes a fully self-contained demo based on the public Iris dataset.

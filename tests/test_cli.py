@@ -285,3 +285,77 @@ class TestRiskGate:
             main(["check", str(path), "--max-risk", "-1"])
         assert excinfo.value.code == 2
         assert "non-negative" in capsys.readouterr().err
+class TestNamedProfilesCli:
+    @pytest.fixture
+    def profiled_rules(self, tmp_path):
+        path = tmp_path / "rules.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "uppercase_only": {"name": {"allowed_values": ["ANN", "BO"]}},
+                        "any_case": {
+                            "name": {"allowed_values": ["ann", "bo"], "ignore_case": True}
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    @pytest.fixture
+    def mixed_csv(self, tmp_path):
+        path = tmp_path / "people.csv"
+        pd.DataFrame({"name": ["ann", "BO"]}).to_csv(path, index=False)
+        return str(path)
+
+    def test_audit_enforces_whichever_profile_is_selected(
+        self, mixed_csv, profiled_rules, capsys
+    ) -> None:
+        assert main(
+            ["audit", mixed_csv, "--json", "--rules", profiled_rules, "--profile", "uppercase_only"]
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert [i for i in payload["issues"] if i["check"] == "rule"]
+
+        assert main(
+            ["audit", mixed_csv, "--json", "--rules", profiled_rules, "--profile", "any_case"]
+        ) == 0
+
+    def test_omitting_the_profile_on_a_profiles_file_is_a_usage_error(
+        self, mixed_csv, profiled_rules, capsys
+    ) -> None:
+        assert main(["audit", mixed_csv, "--rules", profiled_rules]) == 2
+        assert "any_case, uppercase_only" in capsys.readouterr().err
+
+    def test_unknown_profile_is_a_usage_error(
+        self, mixed_csv, profiled_rules, capsys
+    ) -> None:
+        assert main(
+            ["audit", mixed_csv, "--rules", profiled_rules, "--profile", "nope"]
+        ) == 2
+        assert "'nope' not found" in capsys.readouterr().err
+
+    def test_check_honours_profiles_too(
+        self, mixed_csv, profiled_rules, capsys
+    ) -> None:
+        assert main(["check", mixed_csv, "--rules", profiled_rules, "--profile", "any_case"]) == 0
+        assert main(["check", mixed_csv, "--rules", profiled_rules, "--profile", "uppercase_only"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_audit_glob_rejects_an_unknown_profile(
+        self, tmp_path, clean_frame, profiled_rules, capsys
+    ) -> None:
+        clean_frame.to_csv(tmp_path / "one.csv", index=False)
+        assert main(
+            [
+                "audit-glob",
+                str(tmp_path / "*.csv"),
+                "--rules",
+                profiled_rules,
+                "--profile",
+                "nope",
+            ]
+        ) == 2
+        assert "'nope' not found" in capsys.readouterr().err

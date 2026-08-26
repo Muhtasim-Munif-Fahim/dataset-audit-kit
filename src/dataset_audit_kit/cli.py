@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--profile",
+        help="Named rule set to load when the --rules file defines profiles",
+        default=None,
+    )
+    audit.add_argument(
         "--json",
         action="store_true",
         help="Print JSON instead of Markdown",
@@ -211,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit_glob.add_argument(
+        "--profile",
+        help="Named rule set to load when the --rules file defines profiles",
+        default=None,
+    )
+    audit_glob.add_argument(
         "--fail-on",
         choices=["warning", "error"],
         default="warning",
@@ -231,6 +241,11 @@ def build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
     check.add_argument("--rules", help="Path to a JSON file with per-column validation rules", default=None)
+    check.add_argument(
+        "--profile",
+        help="Named rule set to load when the --rules file defines profiles",
+        default=None,
+    )
     check.add_argument(
         "--missing-threshold",
         type=float,
@@ -488,6 +503,18 @@ def _parse_columns(raw: str | None) -> Sequence[str] | None:
     return columns or None
 
 
+def _load_rules(args: argparse.Namespace) -> ValidationRules | None:
+    """Load the --rules file named by args, honouring --profile.
+
+    Returns ``None`` when no file was given; raises ``ValueError`` with an
+    actionable message when the file or the requested profile is unusable.
+    """
+
+    if not args.rules:
+        return None
+    return ValidationRules.from_json(args.rules, profile=args.profile)
+
+
 def _non_negative_float(text: str) -> float:
     """Parse an argparse value that must be zero or positive."""
 
@@ -551,10 +578,15 @@ def _apply_date_filter(
 
 def _cmd_audit(args: argparse.Namespace) -> int:
     """Handle the audit subcommand."""
+    try:
+        rules = _load_rules(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     auditor = DatasetAuditor(
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
-        rules=ValidationRules.from_json(args.rules) if args.rules else None,
+        rules=rules,
         progress=getattr(args, "progress", None),
         whitespace_check=args.check_whitespace,
     )
@@ -730,10 +762,15 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
         print(f"No files match pattern '{args.pattern}'.", file=sys.stderr)
         return 2
 
+    try:
+        rules = _load_rules(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     auditor = DatasetAuditor(
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
-        rules=ValidationRules.from_json(args.rules) if args.rules else None,
+        rules=rules,
     )
     batch = auditor.audit_many(
         matches,
@@ -774,10 +811,15 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     """Handle the check subcommand (CI-friendly)."""
+    try:
+        rules = _load_rules(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     auditor = DatasetAuditor(
         missing_threshold=args.missing_threshold,
         drift_threshold=args.drift_threshold,
-        rules=ValidationRules.from_json(args.rules) if args.rules else None,
+        rules=rules,
         progress=getattr(args, "progress", None),
         whitespace_check=args.check_whitespace,
     )
