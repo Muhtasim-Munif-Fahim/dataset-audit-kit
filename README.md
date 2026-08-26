@@ -76,6 +76,8 @@ stdout stays parseable: `dataset-audit-kit audit data.csv --json | jq .`.
 
 Use `--html-out report.html` to export a shareable standalone HTML report.
 
+Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
+
 ### Exit codes
 
 | Code | Meaning |

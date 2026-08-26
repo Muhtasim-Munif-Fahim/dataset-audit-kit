@@ -10,7 +10,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Sequence
 
-from .core import DatasetAuditor, ValidationRules
+from .core import AuditReport, DatasetAuditor, ValidationRules
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -676,6 +676,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             sample_seed=args.seed,
         )
 
+    _stamp_report(report, args)
+
     # With --json or --minimal the output is meant to be consumed by another
     # program, so progress notes go to stderr and leave stdout parseable.
     machine_readable = bool(args.json or args.minimal)
@@ -746,6 +748,45 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         notice(f"{label} report saved to {path}")
 
     return report.exit_code(args.fail_on, max_risk=args.max_risk)
+
+
+def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
+    """Attach run provenance so a saved report traces back to its invocation.
+
+    The config hash covers every setting that changes findings — thresholds,
+    sampling, schema expectations, and the rules file contents — so two saved
+    reports with equal hashes were produced under the same contract.
+    """
+
+    import hashlib
+    import json
+    import uuid
+    from datetime import datetime, timezone
+
+    fingerprint: dict[str, object] = {
+        "missing_threshold": args.missing_threshold,
+        "drift_threshold": args.drift_threshold,
+        "whitespace_check": args.check_whitespace,
+        "sample_rows": args.sample_rows,
+        "sample_seed": args.seed,
+        "label_column": args.label_column,
+        "expected_columns": _parse_columns(args.expected_columns),
+        "unique_columns": _parse_columns(args.unique_columns),
+        "unique_together": _parse_unique_groups(args.unique_together),
+        "reference": args.reference,
+        "rules_file": args.rules,
+        "rules_profile": args.profile,
+    }
+    if args.rules:
+        fingerprint["rules_sha256"] = hashlib.sha256(
+            Path(args.rules).read_bytes()
+        ).hexdigest()
+
+    report.audit_id = uuid.uuid4().hex
+    report.created_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    report.config_hash = hashlib.sha256(
+        json.dumps(fingerprint, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def _write_text(path: str, content: str) -> str | None:

@@ -968,3 +968,44 @@ class TestNamedRuleProfiles:
             rules=ValidationRules.from_json(str(path), profile="any_age")
         ).audit_dataframe(data)
         assert _messages(relaxed, "rule") == []
+class TestRunMetadataStamping:
+    def _stamped(self) -> AuditReport:
+        report = AuditReport(rows=4, columns=2, duplicate_rows=0, missing_cells=0)
+        report.audit_id = "run123"
+        report.created_utc = "2026-08-26T08:00:00+00:00"
+        report.config_hash = "cafe" * 16
+        return report
+
+    def test_unstamped_json_keeps_its_old_shape(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        assert "meta" not in report.to_dict()
+
+    def test_stamped_json_carries_a_meta_block(self) -> None:
+        payload = json.loads(self._stamped().to_json())
+        assert payload["meta"] == {
+            "audit_id": "run123",
+            "created_utc": "2026-08-26T08:00:00+00:00",
+            "config_hash": "cafe" * 16,
+        }
+
+    def test_sarif_properties_carry_the_run_stamps(self) -> None:
+        runs = json.loads(self._stamped().to_sarif())["runs"]
+        properties = runs[0]["properties"]
+        assert properties["auditId"] == "run123"
+        assert properties["createdUtc"] == "2026-08-26T08:00:00+00:00"
+        assert properties["configHash"] == "cafe" * 16
+
+    def test_unstamped_sarif_omits_the_stamp_keys(self) -> None:
+        plain = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        properties = json.loads(plain.to_sarif())["runs"][0]["properties"]
+        assert set(properties) == {"auditStatus", "qualityScore"}
+
+    def test_html_shows_the_provenance_line(self) -> None:
+        page = self._stamped().to_html()
+        assert "<code>run123</code>" in page
+        assert "Generated 2026-08-26T08:00:00+00:00" in page
+        assert "cafe" * 16 in page
+
+    def test_unstamped_html_has_no_provenance_line(self) -> None:
+        plain = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        assert "Audit ID" not in plain.to_html()

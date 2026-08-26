@@ -610,6 +610,22 @@ def _checked_max_risk(max_risk: float | None) -> float | None:
     return float(max_risk)
 
 
+def _sarif_run_properties(report: "AuditReport") -> dict[str, object]:
+    """Fold status, score, and any run stamps into SARIF run properties."""
+
+    properties: dict[str, object] = {
+        "auditStatus": report.status,
+        "qualityScore": report.quality_score,
+    }
+    if report.audit_id:
+        properties["auditId"] = report.audit_id
+    if report.created_utc:
+        properties["createdUtc"] = report.created_utc
+    if report.config_hash:
+        properties["configHash"] = report.config_hash
+    return properties
+
+
 @dataclass
 class AuditReport:
     """Structured output from a dataset audit."""
@@ -624,6 +640,11 @@ class AuditReport:
     column_profiles: dict[str, dict[str, object]] = field(default_factory=dict)
     issues: list[AuditIssue] = field(default_factory=list)
     risk_score: float = 0.0
+    #: Provenance identifying the run that produced this report. All three
+    #: stay unset until a caller stamps them, keeping library output stable.
+    audit_id: str | None = None
+    created_utc: str | None = None
+    config_hash: str | None = None
 
     @property
     def status(self) -> str:
@@ -678,7 +699,7 @@ class AuditReport:
         return max(0, score)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "quality_score": self.quality_score,
             "risk_score": self.risk_score,
@@ -692,6 +713,13 @@ class AuditReport:
             "column_profiles": self.column_profiles,
             "issues": [issue.__dict__ for issue in self.issues],
         }
+        if any((self.audit_id, self.created_utc, self.config_hash)):
+            payload["meta"] = {
+                "audit_id": self.audit_id,
+                "created_utc": self.created_utc,
+                "config_hash": self.config_hash,
+            }
+        return payload
 
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
@@ -750,10 +778,7 @@ class AuditReport:
                         }
                     },
                     "results": results,
-                    "properties": {
-                        "auditStatus": self.status,
-                        "qualityScore": self.quality_score,
-                    },
+                    "properties": _sarif_run_properties(self),
                 }
             ],
         }
@@ -937,6 +962,19 @@ class AuditReport:
                 f"</td></tr>"
             )
 
+        meta_parts = []
+        if self.audit_id:
+            meta_parts.append(f"Audit ID <code>{esc(self.audit_id)}</code>")
+        if self.created_utc:
+            meta_parts.append(f"Generated {esc(self.created_utc)}")
+        if self.config_hash:
+            meta_parts.append(f"Config hash <code>{esc(self.config_hash)}</code>")
+        meta_line = (
+            [f'<p class="muted">{" &middot; ".join(meta_parts)}</p>']
+            if meta_parts
+            else []
+        )
+
         sections = [
             "<!doctype html>",
             "<html lang=\"en\">",
@@ -969,6 +1007,7 @@ class AuditReport:
             "<main>",
             "<h1>Dataset Audit Report</h1>",
             f'<p class="muted">Status: <strong class="{esc(self.status)}">{esc(self.status)}</strong></p>',
+            *meta_line,
             '<div class="metrics">',
             f'<div class="metric"><span>Rows</span><strong>{self.rows}</strong></div>',
             f'<div class="metric"><span>Columns</span><strong>{self.columns}</strong></div>',

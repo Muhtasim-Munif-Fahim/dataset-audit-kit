@@ -458,3 +458,69 @@ class TestValidateConfig:
             ["validate-config", str(rules_path), "--profile", "wide"]
         ) == 1
         assert "'wide' not found" in capsys.readouterr().err
+class TestStampedCliReports:
+    def test_saved_json_carries_run_metadata(self, tmp_path, clean_csv) -> None:
+        destination = tmp_path / "report.json"
+        assert main(["audit", clean_csv, "--save-json", str(destination)]) == 0
+        meta = json.loads(destination.read_text(encoding="utf-8"))["meta"]
+        assert len(meta["audit_id"]) == 32
+        assert meta["created_utc"].endswith("+00:00")
+        assert len(meta["config_hash"]) == 64
+
+    def test_runs_of_one_config_share_a_hash_but_not_an_id(
+        self, tmp_path, clean_csv
+    ) -> None:
+        hashes = []
+        ids = []
+        for name in ("first.json", "second.json"):
+            destination = tmp_path / name
+            assert main(["audit", clean_csv, "--save-json", str(destination)]) == 0
+            meta = json.loads(destination.read_text(encoding="utf-8"))["meta"]
+            hashes.append(meta["config_hash"])
+            ids.append(meta["audit_id"])
+        assert hashes[0] == hashes[1]
+        assert ids[0] != ids[1]
+
+    def test_changing_a_threshold_changes_the_config_hash(
+        self, tmp_path, clean_csv
+    ) -> None:
+        first = tmp_path / "a.json"
+        second = tmp_path / "b.json"
+        assert main(["audit", clean_csv, "--save-json", str(first)]) == 0
+        assert main(
+            ["audit", clean_csv, "--missing-threshold", "0.9", "--save-json", str(second)]
+        ) == 0
+        meta_a = json.loads(first.read_text(encoding="utf-8"))["meta"]
+        meta_b = json.loads(second.read_text(encoding="utf-8"))["meta"]
+        assert meta_a["config_hash"] != meta_b["config_hash"]
+
+    def test_rules_file_content_is_part_of_the_fingerprint(
+        self, tmp_path, clean_csv
+    ) -> None:
+        rules = tmp_path / "rules.json"
+        rules.write_text('{"id": {"dtype": "numeric"}}', encoding="utf-8")
+        first = tmp_path / "one.json"
+        second = tmp_path / "two.json"
+        assert main(["audit", clean_csv, "--rules", str(rules), "--save-json", str(first)]) == 0
+        rules.write_text('{"name": {"min_length": 2}}', encoding="utf-8")
+        assert main(["audit", clean_csv, "--rules", str(rules), "--save-json", str(second)]) == 0
+        hash_one = json.loads(first.read_text(encoding="utf-8"))["meta"]["config_hash"]
+        hash_two = json.loads(second.read_text(encoding="utf-8"))["meta"]["config_hash"]
+        assert hash_one != hash_two
+
+    def test_sarif_and_html_outputs_are_stamped(self, tmp_path, clean_csv) -> None:
+        sarif = tmp_path / "out" / "report.sarif"
+        page = tmp_path / "out" / "report.html"
+        assert main(
+            ["audit", clean_csv, "--sarif-out", str(sarif), "--html-out", str(page)]
+        ) == 0
+        properties = json.loads(sarif.read_text(encoding="utf-8"))["runs"][0]["properties"]
+        assert properties["auditId"]
+        assert properties["configHash"]
+        html = page.read_text(encoding="utf-8")
+        assert "Audit ID" in html and properties["auditId"] in html
+
+    def test_plain_json_stdout_mode_includes_meta_too(self, clean_csv, capsys) -> None:
+        assert main(["audit", clean_csv, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "meta" in payload
