@@ -156,6 +156,17 @@ Rules are checked per-column for:
 - **Allowed values** — `allowed_values` for categorical columns
 - **Missing ratio** — `max_missing_ratio` (overrides the global threshold per column)
 
+### Lint a Rules File
+
+Check a rules contract before pointing an audit at it — bad JSON, malformed rules, uncompilable patterns, invalid date formats, and unknown dtypes each get one actionable line:
+
+```bash
+dataset-audit-kit validate-config rules.json
+# OK: 3 column rule(s), 0 cross-column rule(s).
+```
+
+`validate-config` exits `0` when the file is sound, `1` when it has findings, and `2` when the file cannot be read. Pass `--profile` to lint one named profile (see below).
+
 ### Named Profiles
 
 One rules file can hold several reusable rule sets under a top-level `profiles` object. Pick one at run time with `--profile`:

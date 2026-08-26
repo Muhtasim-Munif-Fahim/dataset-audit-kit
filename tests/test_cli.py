@@ -359,3 +359,102 @@ class TestNamedProfilesCli:
             ]
         ) == 2
         assert "'nope' not found" in capsys.readouterr().err
+class TestValidateConfig:
+    @pytest.fixture
+    def rules_path(self, tmp_path):
+        return tmp_path / "rules.json"
+
+    def test_a_valid_file_reports_its_rule_counts(self, rules_path, capsys) -> None:
+        rules_path.write_text(
+            json.dumps(
+                {
+                    "age": {"dtype": "numeric", "min_value": 0},
+                    "cross": [{"left": "a", "op": "le", "right": "b"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules_path)]) == 0
+        out = capsys.readouterr().out
+        assert "OK" in out
+        assert "1 column rule(s)" in out
+        assert "1 cross-column rule(s)" in out
+
+    def test_structural_errors_name_the_offending_column(
+        self, rules_path, capsys
+    ) -> None:
+        rules_path.write_text('{"age": {"min_unique": -2}}', encoding="utf-8")
+        assert main(["validate-config", str(rules_path)]) == 1
+        assert "min_unique for column 'age'" in capsys.readouterr().err
+
+    def test_malformed_json_is_reported_with_its_position(
+        self, rules_path, capsys
+    ) -> None:
+        rules_path.write_text('{"age": ', encoding="utf-8")
+        assert main(["validate-config", str(rules_path)]) == 1
+        assert "not valid JSON" in capsys.readouterr().err
+
+    def test_a_missing_file_is_a_usage_error(self, tmp_path, capsys) -> None:
+        missing = tmp_path / "nope.json"
+        assert main(["validate-config", str(missing)]) == 2
+        assert "Cannot read rules file" in capsys.readouterr().err
+
+    def test_an_uncompilable_pattern_is_caught_before_any_audit(
+        self, rules_path, capsys
+    ) -> None:
+        rules_path.write_text(
+            '{"code": {"pattern": "([a-z]+"}}', encoding="utf-8"
+        )
+        assert main(["validate-config", str(rules_path)]) == 1
+        err = capsys.readouterr().err
+        assert "code" in err and "pattern does not compile" in err
+
+    def test_an_invalid_date_format_is_caught(self, rules_path, capsys) -> None:
+        rules_path.write_text(
+            '{"when": {"date_format": "%Y-%Q"}}', encoding="utf-8"
+        )
+        assert main(["validate-config", str(rules_path)]) == 1
+        assert "invalid date_format" in capsys.readouterr().err
+
+    def test_an_unknown_dtype_is_flagged(self, rules_path, capsys) -> None:
+        rules_path.write_text('{"age": {"dtype": "integer"}}', encoding="utf-8")
+        assert main(["validate-config", str(rules_path)]) == 1
+        err = capsys.readouterr().err
+        assert "dtype 'integer'" in err and "numeric, categorical, string" in err
+
+    def test_profiles_are_linted_through_the_same_door(
+        self, rules_path, capsys
+    ) -> None:
+        rules_path.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "strict": {"age": {"dtype": "numeric"}},
+                        "sloppy": {"name": {"pattern": "("}},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert main(
+            ["validate-config", str(rules_path), "--profile", "strict"]
+        ) == 0
+        assert "profile 'strict'" in capsys.readouterr().out
+
+        assert main(["validate-config", str(rules_path), "--profile", "sloppy"]) == 1
+        assert "pattern does not compile" in capsys.readouterr().err
+
+        assert main(["validate-config", str(rules_path)]) == 1
+        assert "sloppy, strict" in capsys.readouterr().err
+
+    def test_an_unknown_profile_name_exits_like_a_bad_contract(
+        self, rules_path, capsys
+    ) -> None:
+        rules_path.write_text(
+            '{"profiles": {"strict": {"age": {"dtype": "numeric"}}}}',
+            encoding="utf-8",
+        )
+        assert main(
+            ["validate-config", str(rules_path), "--profile", "wide"]
+        ) == 1
+        assert "'wide' not found" in capsys.readouterr().err

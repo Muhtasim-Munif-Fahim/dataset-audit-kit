@@ -361,6 +361,19 @@ def build_parser() -> argparse.ArgumentParser:
     schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
     schema_parser.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
 
+    validate_config_parser = subparsers.add_parser(
+        "validate-config",
+        help="Lint a rules JSON file without running an audit",
+    )
+    validate_config_parser.add_argument(
+        "rules_file", help="Path to the rules JSON file to check"
+    )
+    validate_config_parser.add_argument(
+        "--profile",
+        help="Named rule set to validate when the file defines profiles",
+        default=None,
+    )
+
     infer_rules_parser = subparsers.add_parser(
         "infer-rules",
         help="Infer a JSON validation contract from a baseline dataset",
@@ -1197,6 +1210,62 @@ def _cmd_schema(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate_config(args: argparse.Namespace) -> int:
+    """Check a rules file end to end without auditing a dataset.
+
+    Exit 0 means the file parses, the requested profile exists, and every
+    pattern, date format, and dtype will behave as written. Problems print
+    one actionable line each and exit 1; an unreadable file exits 2.
+    """
+
+    import json
+    import re
+    from datetime import datetime
+
+    try:
+        rules = ValidationRules.from_json(args.rules_file, profile=args.profile)
+    except OSError as exc:
+        print(f"Cannot read rules file '{args.rules_file}': {exc}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(f"'{args.rules_file}' is not valid JSON: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Invalid rules in '{args.rules_file}': {exc}", file=sys.stderr)
+        return 1
+
+    findings = []
+    for column, rule in sorted(rules.columns.items()):
+        if rule.dtype is not None and rule.dtype not in {"numeric", "categorical", "string"}:
+            findings.append(
+                f"{column}: dtype '{rule.dtype}' is not one of "
+                "numeric, categorical, string"
+            )
+        if rule.pattern is not None:
+            try:
+                re.compile(rule.pattern)
+            except re.error as exc:
+                findings.append(f"{column}: pattern does not compile: {exc}")
+        if rule.date_format is not None:
+            try:
+                datetime.strptime("2000-01-01", rule.date_format)
+            except ValueError as exc:
+                findings.append(f"{column}: invalid date_format ({exc})")
+
+    if findings:
+        print(f"Invalid rules in '{args.rules_file}':", file=sys.stderr)
+        for finding in findings:
+            print(f"  - {finding}", file=sys.stderr)
+        return 1
+
+    selected = f" (profile '{args.profile}')" if args.profile else ""
+    print(
+        f"OK{selected}: {len(rules.columns)} column rule(s), "
+        f"{len(rules.cross)} cross-column rule(s)."
+    )
+    return 0
+
+
 def _cmd_infer_rules(args: argparse.Namespace) -> int:
     """Infer per-column validation rules and print them as JSON."""
 
@@ -1521,6 +1590,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_schema(args)
     elif args.command == "infer-rules":
         return _cmd_infer_rules(args)
+    elif args.command == "validate-config":
+        return _cmd_validate_config(args)
     elif args.command == "diff":
         return _cmd_diff(args)
     elif args.command == "refs":
