@@ -460,6 +460,62 @@ class TestValidateConfig:
         assert "'wide' not found" in capsys.readouterr().err
 
 
+class TestEmitConfig:
+    def test_emit_config_default_output(self, capsys) -> None:
+        assert main(["emit-config"]) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert "age" in payload
+        assert "category" in payload
+        assert "code" in payload
+        assert "event_date" in payload
+        assert "score" in payload
+        assert "cross" in payload
+        assert len(payload["cross"]) == 2
+
+    def test_emit_config_minimal(self, capsys) -> None:
+        assert main(["emit-config", "--minimal"]) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert "column_name" in payload
+        assert payload["column_name"]["dtype"] == "numeric|categorical|string"
+        assert "cross" in payload
+
+    def test_emit_config_with_profiles(self, capsys) -> None:
+        assert main(["emit-config", "--with-profiles"]) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert "profiles" in payload
+        assert "strict" in payload["profiles"]
+        assert "lenient" in payload["profiles"]
+        assert "age" in payload["profiles"]["strict"]
+
+    def test_emit_config_writes_to_file(self, tmp_path) -> None:
+        dest = tmp_path / "template.json"
+        assert main(["emit-config", "--output", str(dest)]) == 0
+        assert dest.exists()
+        payload = json.loads(dest.read_text(encoding="utf-8"))
+        assert "age" in payload
+        assert "cross" in payload
+
+    def test_emit_config_output_validates(self, tmp_path) -> None:
+        dest = tmp_path / "template.json"
+        assert main(["emit-config", "--output", str(dest)]) == 0
+        # The emitted template should pass validate-config
+        assert main(["validate-config", str(dest)]) == 0
+
+    def test_emit_config_with_profiles_validates(self, tmp_path) -> None:
+        dest = tmp_path / "profiles.json"
+        assert main(["emit-config", "--with-profiles", "--output", str(dest)]) == 0
+        # Each profile should validate
+        assert main(["validate-config", str(dest), "--profile", "strict"]) == 0
+        assert main(["validate-config", str(dest), "--profile", "lenient"]) == 0
+
+    def test_emit_config_creates_parent_directories(self, tmp_path) -> None:
+        dest = tmp_path / "nested" / "dir" / "template.json"
+        assert main(["emit-config", "--output", str(dest)]) == 0
+        assert dest.exists()
+
 class TestStampedCliReports:
     def test_saved_json_carries_run_metadata(self, tmp_path, clean_csv) -> None:
         destination = tmp_path / "report.json"

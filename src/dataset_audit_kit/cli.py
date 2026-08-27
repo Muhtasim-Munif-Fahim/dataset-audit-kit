@@ -424,6 +424,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Extra missing fraction allowed above the baseline (default: 0)",
     )
+    emit_config_parser = subparsers.add_parser(
+        "emit-config",
+        help="Emit a starter rules JSON template with examples and comments",
+    )
+    emit_config_parser.add_argument(
+        "--output", "-o",
+        help="Write the template to a file instead of stdout",
+        default=None,
+    )
+    emit_config_parser.add_argument(
+        "--with-profiles",
+        action="store_true",
+        help="Include a profiles section with example named rule sets",
+        default=False,
+    )
+    emit_config_parser.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Emit a minimal template without comments",
+        default=False,
+    )
+
+
     rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
     rename_parser.add_argument("data", help="Path to the dataset")
     rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
@@ -1362,6 +1385,141 @@ def _cmd_infer_rules(args: argparse.Namespace) -> int:
 
 
 
+def _cmd_emit_config(args: argparse.Namespace) -> int:
+    """Emit a starter rules JSON template with examples and comments."""
+
+    import json
+
+    template = _build_config_template(with_profiles=args.with_profiles, minimal=args.minimal)
+
+    if args.output:
+        from pathlib import Path
+        path = Path(args.output)
+        if path.parent != Path(""):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(template, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        print(f"Template written to {path}", file=sys.stderr)
+    else:
+        print(json.dumps(template, indent=2, sort_keys=False))
+    return 0
+
+
+def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
+    """Build a starter rules JSON template."""
+
+    if minimal:
+        return _minimal_template()
+
+    template = {
+        # Per-column validation rules. Each key is a column name.
+        # See https://github.com/Muhtasim-Munif-Fahim/dataset-audit-kit for full docs.
+        "age": {
+            # Expected data type: "numeric", "categorical", or "string"
+            "dtype": "numeric",
+            # Minimum allowed value (numeric columns only)
+            "min_value": 0,
+            # Maximum allowed value (numeric columns only)
+            "max_value": 120,
+            # Maximum allowed fraction of missing values (0.0 to 1.0)
+            "max_missing_ratio": 0.05,
+            # Maximum allowed fraction of IQR outliers (0.0 to 1.0)
+            "max_outlier_ratio": 0.10,
+            # Maximum allowed drift score when a reference dataset is supplied
+            "max_drift": 0.20,
+        },
+        "category": {
+            "dtype": "categorical",
+            # List of allowed values. Values outside this set are flagged.
+            "allowed_values": ["A", "B", "C"],
+            # When true, allowed-value matching ignores letter case
+            "ignore_case": False,
+            "max_missing_ratio": 0.02,
+            # Minimum/maximum number of unique values allowed
+            "min_unique": 2,
+            "max_unique": 10,
+        },
+        "code": {
+            "dtype": "string",
+            # Regular expression that every non-missing value must fully match
+            "pattern": "^[A-Z]{3}-\\d{4}$",
+            # Minimum/maximum string length
+            "min_length": 3,
+            "max_length": 20,
+            "max_missing_ratio": 0.0,
+        },
+        "event_date": {
+            "dtype": "string",
+            # strptime format that every non-missing value must parse as a datetime
+            "date_format": "%Y-%m-%d",
+            "max_missing_ratio": 0.01,
+        },
+        "score": {
+            "dtype": "numeric",
+            "min_value": 0.0,
+            "max_value": 100.0,
+            "max_missing_ratio": 0.05,
+            "max_outlier_ratio": 0.05,
+        },
+        # Relational constraints between pairs of columns (optional)
+        "cross": [
+            {
+                "left": "start_date",
+                "op": "le",  # one of: le, lt, ge, gt, eq, ne
+                "right": "end_date",
+                "missing_ok": True
+            },
+            {
+                "left": "quantity",
+                "op": "le",
+                "right": "max_quantity",
+                "missing_ok": False
+            }
+        ],
+    }
+
+    if with_profiles:
+        template = {
+            "profiles": {
+                "strict": {
+                    "age": {"dtype": "numeric", "min_value": 18, "max_value": 99, "max_missing_ratio": 0.0},
+                    "email": {"dtype": "string", "pattern": "^[^@]+@[^@]+\\.[^@]+$", "max_missing_ratio": 0.0},
+                    "status": {"dtype": "categorical", "allowed_values": ["active", "inactive"], "ignore_case": True},
+                },
+                "lenient": {
+                    "age": {"dtype": "numeric", "min_value": 0, "max_value": 120, "max_missing_ratio": 0.10},
+                    "email": {"dtype": "string", "max_missing_ratio": 0.20},
+                    "status": {"dtype": "categorical", "allowed_values": ["active", "inactive", "pending"], "ignore_case": True},
+                },
+            }
+        }
+
+    return template
+
+
+def _minimal_template() -> dict:
+    """Return a minimal template without comments."""
+    return {
+        "column_name": {
+            "dtype": "numeric|categorical|string",
+            "min_value": 0,
+            "max_value": 100,
+            "allowed_values": ["A", "B"],
+            "ignore_case": False,
+            "max_missing_ratio": 0.05,
+            "pattern": "^[A-Z]+$",
+            "min_length": 1,
+            "max_length": 50,
+            "date_format": "%Y-%m-%d",
+            "min_unique": 1,
+            "max_unique": 20,
+            "max_outlier_ratio": 0.10,
+            "max_drift": 0.20,
+        },
+        "cross": [
+            {"left": "col_a", "op": "le", "right": "col_b", "missing_ok": True}
+        ]
+    }
+
 def _cmd_rename(args: argparse.Namespace) -> int:
     """Handle the rename subcommand."""
     mapping: dict[str, str] = {}
@@ -1604,7 +1762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # `rename` takes --output as its destination file, so it is not a redirect.
-    redirect = getattr(args, "output", None) if args.command != "rename" else None
+    redirect = getattr(args, "output", None) if args.command not in {"rename", "emit-config"} else None
     if redirect:
         import contextlib
 
@@ -1668,6 +1826,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_schema(args)
     elif args.command == "infer-rules":
         return _cmd_infer_rules(args)
+    elif args.command == "emit-config":
+        return _cmd_emit_config(args)
     elif args.command == "validate-config":
         return _cmd_validate_config(args)
     elif args.command == "diff":
