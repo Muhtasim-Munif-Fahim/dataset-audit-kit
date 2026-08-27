@@ -173,6 +173,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Flag values padded with whitespace or carrying invisible characters",
     )
     audit.add_argument(
+        "--check-null-patterns",
+        action="store_true",
+        help="Flag literal null-pattern strings (NA, NULL, N/A, empty, etc.) in text columns",
+    )
+    audit.add_argument(
+        "--null-pattern-threshold",
+        type=float,
+        default=0.05,
+        help="Fraction of null-pattern values allowed before warning (default: 0.05)",
+    )
+    audit.add_argument(
         "--max-risk",
         type=_non_negative_float,
         default=None,
@@ -233,6 +244,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit with code 1 when any file's weighted risk score exceeds this ceiling",
     )
     audit_glob.add_argument(
+        "--check-null-patterns",
+        action="store_true",
+        help="Flag literal null-pattern strings (NA, NULL, N/A, empty, etc.) in text columns",
+    )
+    audit_glob.add_argument(
+        "--null-pattern-threshold",
+        type=float,
+        default=0.05,
+        help="Fraction of null-pattern values allowed before warning (default: 0.05)",
+    )
+    audit_glob.add_argument(
         "--json",
         action="store_true",
         help="Print the batch report as JSON instead of the rollup table",
@@ -268,6 +290,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-whitespace",
         action="store_true",
         help="Flag values padded with whitespace or carrying invisible characters",
+    )
+    check.add_argument(
+        "--check-null-patterns",
+        action="store_true",
+        help="Flag literal null-pattern strings (NA, NULL, N/A, empty, etc.) in text columns",
+    )
+    check.add_argument(
+        "--null-pattern-threshold",
+        type=float,
+        default=0.05,
+        help="Fraction of null-pattern values allowed before warning (default: 0.05)",
     )
     check.add_argument(
         "--progress",
@@ -391,7 +424,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Extra missing fraction allowed above the baseline (default: 0)",
     )
-
     rename_parser = subparsers.add_parser("rename", help="Rename columns and write the result to a new file")
     rename_parser.add_argument("data", help="Path to the dataset")
     rename_parser.add_argument("--map", required=True, action="append", metavar="OLD=NEW", help="Rename OLD to NEW; repeatable")
@@ -602,6 +634,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         rules=rules,
         progress=getattr(args, "progress", None),
         whitespace_check=args.check_whitespace,
+        null_pattern_check=args.check_null_patterns,
+        null_pattern_threshold=args.null_pattern_threshold,
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -876,6 +910,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         rules=rules,
         progress=getattr(args, "progress", None),
         whitespace_check=args.check_whitespace,
+        null_pattern_check=args.check_null_patterns,
+        null_pattern_threshold=args.null_pattern_threshold,
     )
     report = auditor.audit_file(
         args.data,
@@ -932,14 +968,13 @@ def _cmd_info(args: argparse.Namespace) -> int:
     mem = data.memory_usage(deep=True).sum() / 1024 / 1024
     print(f"Shape:  {data.shape[0]} rows x {data.shape[1]} columns")
     print(f"Memory: {mem:.2f} MB")
-    print(f"Dtypes:")
+    print("Dtypes:")
     for dt, cnt in data.dtypes.value_counts().items():
         print(f"  {dt}: {cnt}")
     return 0
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:
-    import pandas as pd
     data = _load(args)
     print(data.tail(args.rows).to_csv(index=False))
     return 0
@@ -1323,6 +1358,8 @@ def _cmd_infer_rules(args: argparse.Namespace) -> int:
         return 2
     print(json.dumps(rules.to_dict(), indent=2, sort_keys=True))
     return 0
+
+
 
 
 def _cmd_rename(args: argparse.Namespace) -> int:

@@ -458,6 +458,8 @@ class TestValidateConfig:
             ["validate-config", str(rules_path), "--profile", "wide"]
         ) == 1
         assert "'wide' not found" in capsys.readouterr().err
+
+
 class TestStampedCliReports:
     def test_saved_json_carries_run_metadata(self, tmp_path, clean_csv) -> None:
         destination = tmp_path / "report.json"

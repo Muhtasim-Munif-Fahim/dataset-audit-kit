@@ -25,6 +25,9 @@ PROGRESS_ROW_THRESHOLD = 100_000
 #: Weight a check carries in the risk score when not configured explicitly.
 DEFAULT_RISK_WEIGHT = 10.0
 
+#: Default fraction of null-pattern values allowed before warning.
+DEFAULT_NULL_PATTERN_THRESHOLD = 0.05
+
 #: Fraction of its weight a warning contributes, relative to an error.
 RISK_WARNING_FACTOR = 0.5
 
@@ -47,6 +50,14 @@ INVISIBLE_CHARACTERS = (
 #: Pattern matching any single invisible character.
 INVISIBLE_CHAR_PATTERN = "[" + "".join(INVISIBLE_CHARACTERS) + "]"
 
+#: Literal strings commonly used to encode missing values in text columns.
+NULL_PATTERNS = frozenset({
+    "na", "n/a", "null", "none", "nan", "nil", "", "-", "unknown", "missing", "na", "n.a."
+})
+
+#: Lowercased version for case-insensitive matching.
+NULL_PATTERNS_LOWER = {p.lower() for p in NULL_PATTERNS}
+
 #: Ordered names of the audit phases, used for progress reporting.
 _AUDIT_PHASES = (
     "missingness",
@@ -58,6 +69,7 @@ _AUDIT_PHASES = (
     "drift",
     "rules",
     "whitespace",
+    "null_patterns",
     "profiles",
     "redundancy",
 )
@@ -1323,11 +1335,15 @@ class DatasetAuditor:
         severity_weights: dict[str, float] | None = None,
         progress: bool | None = None,
         whitespace_check: bool = False,
+        null_pattern_check: bool = False,
+        null_pattern_threshold: float = DEFAULT_NULL_PATTERN_THRESHOLD,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
         if not 0.0 <= max_duplicate_ratio <= 1.0:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
+        if not 0.0 <= null_pattern_threshold <= 1.0:
+            raise ValueError("null_pattern_threshold must be between 0 and 1")
         for name, value in (
             ("min_rows", min_rows),
             ("max_rows", max_rows),
@@ -1364,6 +1380,8 @@ class DatasetAuditor:
         #: None means "decide from the row count"; True/False force it.
         self.progress = progress
         self.whitespace_check = whitespace_check
+        self.null_pattern_check = null_pattern_check
+        self.null_pattern_threshold = null_pattern_threshold
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -1522,11 +1540,7 @@ class DatasetAuditor:
             correlation_drift_scores = self._correlation_drift(
                 data, reference, issues, drift_threshold=self.drift_threshold
             )
-
-        # Schema diff between reference and current
-        schema_diff_summary: dict[str, dict[str, object]] = {}
-        if reference is not None:
-            schema_diff_summary = self._schema_diff(data, reference, issues)
+            self._schema_diff(data, reference, issues)
 
         progress.advance("rules")
         # Per-column validation rules
@@ -1537,6 +1551,10 @@ class DatasetAuditor:
         progress.advance("whitespace")
         if self.whitespace_check:
             self._check_whitespace_values(data, issues)
+
+        progress.advance("null_patterns")
+        if self.null_pattern_check:
+            self._check_null_patterns(data, issues, threshold=self.null_pattern_threshold)
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
@@ -1966,6 +1984,62 @@ class DatasetAuditor:
                         ),
                         column=str(column),
                         observed=invisible,
+                    )
+                )
+
+    def _check_null_patterns(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        threshold: float = DEFAULT_NULL_PATTERN_THRESHOLD,
+    ) -> None:
+        """Flag text columns containing literal null-pattern strings.
+
+        Many datasets encode missingness as literal strings like "NA", "NULL",
+        "N/A", "", "None", "nan", etc. instead of using proper NaN/None.
+        This check detects such patterns in text/categorical columns when they
+        exceed a configured fraction of non-null values.
+        """
+        if threshold <= 0:
+            return
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
+            if not (
+                isinstance(col.dtype, pd.CategoricalDtype)
+                or col.dtype == object
+                or pd.api.types.is_string_dtype(col)
+            ):
+                continue
+            values = col.dropna().astype(str)
+            if values.empty:
+                continue
+            total = len(values)
+            # Count values that match known null patterns (case-insensitive)
+            lowered = values.str.lower()
+            null_like = lowered.isin(NULL_PATTERNS_LOWER)
+            count = int(null_like.sum())
+            if count == 0:
+                continue
+            ratio = count / total
+            if ratio >= threshold:
+                examples = (
+                    values[null_like]
+                    .unique()[:5]
+                    .tolist()
+                )
+                issues.append(
+                    AuditIssue(
+                        check="null_pattern",
+                        severity="warning",
+                        message=(
+                            f"{count} value(s) ({ratio:.1%}) match common null "
+                            f"patterns (e.g., {', '.join(repr(e) for e in examples)}). "
+                            f"Consider converting to proper missing values."
+                        ),
+                        column=str(column),
+                        observed=ratio,
+                        threshold=threshold,
                     )
                 )
 
