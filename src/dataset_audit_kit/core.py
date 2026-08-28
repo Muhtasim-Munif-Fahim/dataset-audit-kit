@@ -159,6 +159,16 @@ class ColumnRule:
         Minimum allowed value (numeric columns only).
     max_value : float | None
         Maximum allowed value (numeric columns only).
+    min_inclusive : bool
+        When True, a value equal to ``min_value`` satisfies the bound;
+        when False, only values strictly above it do.
+    max_inclusive : bool
+        When True, a value equal to ``max_value`` satisfies the bound;
+        when False, only values strictly below it do.
+    value_tolerance : float
+        Slack applied to both bounds: a value within this distance of a bound
+        is accepted. Useful for floating-point pipelines where rounding
+        nudges values across an exact boundary.
     allowed_values : list[str] | None
         Set of allowed values (categorical/string columns only).
     ignore_case : bool
@@ -186,6 +196,9 @@ class ColumnRule:
     dtype: str | None = None
     min_value: float | None = None
     max_value: float | None = None
+    min_inclusive: bool = True
+    max_inclusive: bool = True
+    value_tolerance: float = 0.0
     allowed_values: list[str] | None = None
     ignore_case: bool = False
     max_missing_ratio: float | None = None
@@ -286,6 +299,27 @@ class ValidationRules:
                     raise ValueError(
                         f"max_outlier_ratio for column '{col_name}' must be between 0 and 1"
                     )
+            value_tolerance = col_config.get("value_tolerance", 0.0)
+            if value_tolerance is not None:
+                if (
+                    isinstance(value_tolerance, bool)
+                    or not isinstance(value_tolerance, (int, float))
+                    or not math.isfinite(float(value_tolerance))
+                    or float(value_tolerance) < 0.0
+                ):
+                    raise ValueError(
+                        f"value_tolerance for column '{col_name}' must be a non-negative number"
+                    )
+            min_inclusive = col_config.get("min_inclusive", True)
+            if not isinstance(min_inclusive, bool):
+                raise ValueError(
+                    f"min_inclusive for column '{col_name}' must be a boolean"
+                )
+            max_inclusive = col_config.get("max_inclusive", True)
+            if not isinstance(max_inclusive, bool):
+                raise ValueError(
+                    f"max_inclusive for column '{col_name}' must be a boolean"
+                )
             ignore_case = col_config.get("ignore_case", False)
             if not isinstance(ignore_case, bool):
                 raise ValueError(
@@ -306,6 +340,9 @@ class ValidationRules:
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
                 min_value=col_config.get("min_value"),
                 max_value=col_config.get("max_value"),
+                min_inclusive=min_inclusive,
+                max_inclusive=max_inclusive,
+                value_tolerance=float(value_tolerance) if value_tolerance is not None else 0.0,
                 allowed_values=col_config.get("allowed_values"),
                 ignore_case=ignore_case,
                 max_missing_ratio=col_config.get("max_missing_ratio"),
@@ -463,6 +500,12 @@ class ValidationRules:
                     entry[attr] = value
             if rule.ignore_case:
                 entry["ignore_case"] = True
+            if not rule.min_inclusive:
+                entry["min_inclusive"] = False
+            if not rule.max_inclusive:
+                entry["max_inclusive"] = False
+            if rule.value_tolerance:
+                entry["value_tolerance"] = rule.value_tolerance
             result[name] = entry
         if self.cross:
             result["cross"] = [
@@ -2347,26 +2390,46 @@ class DatasetAuditor:
             if rule.min_value is not None or rule.max_value is not None:
                 numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
                 if rule.min_value is not None:
-                    violations = (numeric < rule.min_value).sum()
+                    effective_min = rule.min_value - rule.value_tolerance
+                    if rule.min_inclusive:
+                        violations = int((numeric < effective_min).sum())
+                    else:
+                        violations = int((numeric <= effective_min).sum())
                     if violations:
+                        modifier = " (exclusive bound)" if not rule.min_inclusive else ""
+                        if rule.value_tolerance:
+                            modifier += f" beyond {rule.value_tolerance:g} tolerance"
                         issues.append(
                             AuditIssue(
                                 check="rule",
                                 severity="warning",
-                                message=f"{int(violations)} value(s) below minimum {rule.min_value}.",
+                                message=(
+                                    f"{violations} value(s) below minimum "
+                                    f"{rule.min_value}{modifier}."
+                                ),
                                 column=column_name,
                                 observed=float(violations),
                                 threshold=rule.min_value,
                             )
                         )
                 if rule.max_value is not None:
-                    violations = (numeric > rule.max_value).sum()
+                    effective_max = rule.max_value + rule.value_tolerance
+                    if rule.max_inclusive:
+                        violations = int((numeric > effective_max).sum())
+                    else:
+                        violations = int((numeric >= effective_max).sum())
                     if violations:
+                        modifier = " (exclusive bound)" if not rule.max_inclusive else ""
+                        if rule.value_tolerance:
+                            modifier += f" beyond {rule.value_tolerance:g} tolerance"
                         issues.append(
                             AuditIssue(
                                 check="rule",
                                 severity="warning",
-                                message=f"{int(violations)} value(s) above maximum {rule.max_value}.",
+                                message=(
+                                    f"{violations} value(s) above maximum "
+                                    f"{rule.max_value}{modifier}."
+                                ),
                                 column=column_name,
                                 observed=float(violations),
                                 threshold=rule.max_value,
@@ -2387,8 +2450,21 @@ class DatasetAuditor:
                     if iqr > 0:
                         lower_fence = q1 - 1.5 * iqr
                         upper_fence = q3 + 1.5 * iqr
-                        low_outliers = int((numeric < max(lower_fence, rule.min_value if rule.min_value is not None else lower_fence)).sum())
-                        high_outliers = int((numeric > min(upper_fence, rule.max_value if rule.max_value is not None else upper_fence)).sum())
+                        # Bounds act as a hard fence for outlier counting, so
+                        # the tolerance slack applies to them just as it does
+                        # to the bound check itself.
+                        bound_min = (
+                            rule.min_value - rule.value_tolerance
+                            if rule.min_value is not None
+                            else lower_fence
+                        )
+                        bound_max = (
+                            rule.max_value + rule.value_tolerance
+                            if rule.max_value is not None
+                            else upper_fence
+                        )
+                        low_outliers = int((numeric < max(lower_fence, bound_min)).sum())
+                        high_outliers = int((numeric > min(upper_fence, bound_max)).sum())
                         total_outliers = low_outliers + high_outliers
                         total = len(numeric)
                         outlier_ratio = total_outliers / max(total, 1)

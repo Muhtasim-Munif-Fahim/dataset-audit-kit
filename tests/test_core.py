@@ -578,6 +578,114 @@ class TestOutlierRatioRules:
             ValidationRules.from_dict({"score": {"max_outlier_ratio": 1.1}})
 
 
+class TestNumericBoundModes:
+    def test_bounds_are_inclusive_by_default(self) -> None:
+        rules = ValidationRules.from_dict({"n": {"min_value": 0.0, "max_value": 10.0}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"n": [0.0, 10.0, -0.1, 10.1]})
+        )
+
+        messages = _messages(report, "rule")
+        assert any("below minimum 0.0" in m for m in messages)
+        assert any("above maximum 10.0" in m for m in messages)
+        issues = [i for i in report.issues if i.check == "rule" and i.severity == "warning"]
+        assert [i.observed for i in issues] == [1.0, 1.0]
+
+    def test_exclusive_min_flags_the_boundary_value(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"n": {"min_value": 0.0, "min_inclusive": False}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"n": [0.0, 1.0, -1.0]})
+        )
+
+        issue = next(i for i in report.issues if i.check == "rule")
+        assert issue.observed == 2.0
+        assert "exclusive bound" in issue.message
+        assert issue.message.startswith("2 value(s) below minimum 0.0")
+
+    def test_exclusive_max_flags_the_boundary_value(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"n": {"max_value": 10.0, "max_inclusive": False}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"n": [10.0, 9.0, 11.0]})
+        )
+
+        issue = next(i for i in report.issues if i.check == "rule")
+        assert issue.observed == 2.0
+        assert "exclusive bound" in issue.message
+        assert issue.message.startswith("2 value(s) above maximum 10.0")
+
+    def test_tolerance_absorbs_values_near_the_bound(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"n": {"min_value": 0.0, "value_tolerance": 0.5}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"n": [-0.4, 0.0, -0.6]})
+        )
+
+        issue = next(i for i in report.issues if i.check == "rule")
+        assert issue.observed == 1.0
+        assert "beyond 0.5 tolerance" in issue.message
+
+    def test_tolerance_and_exclusive_mode_compose(self) -> None:
+        rules = ValidationRules.from_dict(
+            {
+                "n": {
+                    "max_value": 10.0,
+                    "max_inclusive": False,
+                    "value_tolerance": 0.25,
+                }
+            }
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"n": [10.2, 10.0, 10.3]})
+        )
+
+        issue = next(i for i in report.issues if i.check == "rule")
+        assert issue.observed == 1.0
+        assert "exclusive bound" in issue.message
+        assert "beyond 0.25 tolerance" in issue.message
+
+    def test_new_options_round_trip_through_the_dict_form(self) -> None:
+        rules = ValidationRules.from_dict(
+            {
+                "n": {
+                    "min_value": 0.0,
+                    "min_inclusive": False,
+                    "max_inclusive": False,
+                    "value_tolerance": 0.25,
+                }
+            }
+        )
+        entry = rules.to_dict()["n"]
+        assert entry["min_inclusive"] is False
+        assert entry["max_inclusive"] is False
+        assert entry["value_tolerance"] == 0.25
+
+        reloaded = ValidationRules.from_dict({"n": entry})
+        assert reloaded.columns["n"].min_inclusive is False
+        assert reloaded.columns["n"].max_inclusive is False
+        assert reloaded.columns["n"].value_tolerance == 0.25
+
+    def test_defaults_are_omitted_from_the_dict_form(self) -> None:
+        rules = ValidationRules.from_dict({"n": {"min_value": 0.0}})
+        entry = rules.to_dict()["n"]
+        assert "min_inclusive" not in entry
+        assert "value_tolerance" not in entry
+
+    def test_rejects_negative_tolerance(self) -> None:
+        with pytest.raises(ValueError, match="value_tolerance"):
+            ValidationRules.from_dict({"n": {"min_value": 0, "value_tolerance": -0.1}})
+
+    def test_rejects_non_boolean_modes(self) -> None:
+        with pytest.raises(ValueError, match="min_inclusive"):
+            ValidationRules.from_dict({"n": {"min_value": 0, "min_inclusive": "yes"}})
+        with pytest.raises(ValueError, match="max_inclusive"):
+            ValidationRules.from_dict({"n": {"max_value": 5, "max_inclusive": 1}})
+
+
 class TestDuplicateAllowance:
     def test_allows_duplicate_rows_within_configured_ratio(self) -> None:
         data = pd.DataFrame({"id": [1, 1, 2, 3]})

@@ -359,7 +359,48 @@ class TestNamedProfilesCli:
             ]
         ) == 2
         assert "'nope' not found" in capsys.readouterr().err
+class TestNumericBoundModesCli:
+    def test_exclusive_bounds_from_a_rules_file_change_the_gate(self, tmp_path, capsys) -> None:
+        path = tmp_path / "scores.csv"
+        pd.DataFrame({"score": [0.0, 1.0, 2.0]}).to_csv(path, index=False)
+
+        inclusive = tmp_path / "inclusive.json"
+        inclusive.write_text('{"score": {"min_value": 0.0}}', encoding="utf-8")
+        assert main(["audit", str(path), "--json", "--rules", str(inclusive)]) == 0
+        capsys.readouterr()
+
+        exclusive = tmp_path / "exclusive.json"
+        exclusive.write_text(
+            '{"score": {"min_value": 0.0, "min_inclusive": false}}',
+            encoding="utf-8",
+        )
+        assert main(["audit", str(path), "--json", "--rules", str(exclusive)]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        rule_issues = [i for i in payload["issues"] if i["check"] == "rule"]
+        assert any("exclusive bound" in i["message"] for i in rule_issues)
+
+    def test_validate_config_accepts_the_new_options(self, tmp_path, capsys) -> None:
+        rules = tmp_path / "bounds.json"
+        rules.write_text(
+            json.dumps(
+                {
+                    "score": {
+                        "min_value": 0.0,
+                        "max_value": 100.0,
+                        "min_inclusive": False,
+                        "max_inclusive": False,
+                        "value_tolerance": 0.5,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules)]) == 0
+        assert "1 column rule(s)" in capsys.readouterr().out
+
+
 class TestValidateConfig:
+
     @pytest.fixture
     def rules_path(self, tmp_path):
         return tmp_path / "rules.json"

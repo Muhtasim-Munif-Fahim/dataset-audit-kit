@@ -1420,6 +1420,11 @@ def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
             "min_value": 0,
             # Maximum allowed value (numeric columns only)
             "max_value": 120,
+            # False makes the bounds exclusive (boundary values are flagged)
+            "min_inclusive": True,
+            "max_inclusive": True,
+            # Accept values within this distance of a bound (floating-point slack)
+            "value_tolerance": 0.0,
             # Maximum allowed fraction of missing values (0.0 to 1.0)
             "max_missing_ratio": 0.05,
             # Maximum allowed fraction of IQR outliers (0.0 to 1.0)
@@ -1503,6 +1508,9 @@ def _minimal_template() -> dict:
             "dtype": "numeric|categorical|string",
             "min_value": 0,
             "max_value": 100,
+            "min_inclusive": True,
+            "max_inclusive": True,
+            "value_tolerance": 0.0,
             "allowed_values": ["A", "B"],
             "ignore_case": False,
             "max_missing_ratio": 0.05,
