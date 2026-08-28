@@ -854,6 +854,70 @@ class TestDuplicateColumnDetection:
         report = DatasetAuditor().audit_dataframe(data)
         checks = [i.check for i in report.issues]
         assert "duplicate_columns" in checks
+class TestCategoryShareCheck:
+    def test_dominant_category_is_flagged_when_configured(self) -> None:
+        data = pd.DataFrame({"status": ["ok"] * 9 + ["no"]})
+        report = DatasetAuditor(max_category_share=0.80).audit_dataframe(data)
+
+        issue = next(i for i in report.issues if i.check == "category_share")
+        assert issue.observed == 0.9
+        assert issue.severity == "warning"
+        assert "90.0%" in issue.message
+
+    def test_share_at_or_below_the_threshold_stays_silent(self) -> None:
+        data = pd.DataFrame({"status": ["ok"] * 7 + ["no"] * 3})
+        report = DatasetAuditor(max_category_share=0.80).audit_dataframe(data)
+
+        assert _messages(report, "category_share") == []
+
+    def test_rare_categories_are_flagged_when_configured(self) -> None:
+        data = pd.DataFrame({"status": ["a"] * 8 + ["b"] + ["c"]})
+        report = DatasetAuditor(rare_category_share=0.15).audit_dataframe(data)
+
+        issue = next(i for i in report.issues if i.check == "category_share")
+        assert issue.observed == 2
+        assert "rare category(ies)" in issue.message
+
+    def test_dominance_and_rarity_can_fire_together(self) -> None:
+        data = pd.DataFrame({"status": ["a"] * 9 + ["b"] + ["c"]})
+        report = DatasetAuditor(
+            max_category_share=0.80, rare_category_share=0.15
+        ).audit_dataframe(data)
+
+        flagged = [i for i in report.issues if i.check == "category_share"]
+        assert len(flagged) == 2
+
+    def test_missing_values_do_not_count_toward_the_share(self) -> None:
+        data = pd.DataFrame({"status": ["ok"] * 9 + [None] * 5})
+        report = DatasetAuditor(max_category_share=0.80).audit_dataframe(data)
+
+        # 9 of 9 non-missing values are "ok" -> a 100% share.
+        issue = next(i for i in report.issues if i.check == "category_share")
+        assert issue.observed == 1.0
+
+    def test_numeric_columns_are_ignored(self) -> None:
+        data = pd.DataFrame({"n": [1, 1, 1, 1, 2]})
+        report = DatasetAuditor(max_category_share=0.50).audit_dataframe(data)
+
+        assert _messages(report, "category_share") == []
+
+    def test_the_check_is_off_by_default(self) -> None:
+        data = pd.DataFrame({"status": ["ok", "ok", "ok"]})
+        report = DatasetAuditor().audit_dataframe(data)
+
+        assert _messages(report, "category_share") == []
+
+    def test_thresholds_must_be_fractions_between_zero_and_one(self) -> None:
+        with pytest.raises(ValueError, match="max_category_share"):
+            DatasetAuditor(max_category_share=1.5)
+        with pytest.raises(ValueError, match="max_category_share"):
+            DatasetAuditor(max_category_share=0.0)
+        with pytest.raises(ValueError, match="rare_category_share"):
+            DatasetAuditor(rare_category_share=0.0)
+        with pytest.raises(ValueError, match="rare_category_share"):
+            DatasetAuditor(rare_category_share=True)
+
+
 class TestWeightedRiskScoring:
     def test_default_weights_score_an_error_at_double_a_warning(self) -> None:
         data = pd.DataFrame({"n": [-1.0, -2.0]})

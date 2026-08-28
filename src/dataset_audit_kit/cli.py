@@ -189,6 +189,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exit with code 1 when the weighted risk score exceeds this ceiling",
     )
+    audit.add_argument(
+        "--max-category-share",
+        type=_unit_interval,
+        default=None,
+        help="Warn when a categorical column's most frequent value exceeds this share",
+    )
+    audit.add_argument(
+        "--rare-category-share",
+        type=_unit_interval,
+        default=None,
+        help="Warn when a categorical column contains values below this share",
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -340,6 +352,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=_non_negative_float,
         default=None,
         help="Exit with code 1 when the weighted risk score exceeds this ceiling",
+    )
+    check.add_argument(
+        "--max-category-share",
+        type=_unit_interval,
+        default=None,
+        help="Warn when a categorical column's most frequent value exceeds this share",
+    )
+    check.add_argument(
+        "--rare-category-share",
+        type=_unit_interval,
+        default=None,
+        help="Warn when a categorical column contains values below this share",
     )
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
@@ -592,6 +616,15 @@ def _non_negative_float(text: str) -> float:
     return value
 
 
+def _unit_interval(text: str) -> float:
+    """Parse an argparse value that must be a fraction between 0 and 1."""
+
+    value = float(text)
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return value
+
+
 def _parse_unique_groups(raw: Sequence[str] | None) -> list[list[str]] | None:
     if raw is None:
         return None
@@ -659,6 +692,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         whitespace_check=args.check_whitespace,
         null_pattern_check=args.check_null_patterns,
         null_pattern_threshold=args.null_pattern_threshold,
+        max_category_share=getattr(args, "max_category_share", None),
+        rare_category_share=getattr(args, "rare_category_share", None),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -833,6 +868,8 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "reference": args.reference,
         "rules_file": args.rules,
         "rules_profile": args.profile,
+        "max_category_share": getattr(args, "max_category_share", None),
+        "rare_category_share": getattr(args, "rare_category_share", None),
     }
     if args.rules:
         fingerprint["rules_sha256"] = hashlib.sha256(
@@ -935,6 +972,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         whitespace_check=args.check_whitespace,
         null_pattern_check=args.check_null_patterns,
         null_pattern_threshold=args.null_pattern_threshold,
+        max_category_share=getattr(args, "max_category_share", None),
+        rare_category_share=getattr(args, "rare_category_share", None),
     )
     report = auditor.audit_file(
         args.data,

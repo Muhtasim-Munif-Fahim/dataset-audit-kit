@@ -71,6 +71,7 @@ _AUDIT_PHASES = (
     "whitespace",
     "null_patterns",
     "profiles",
+    "category_share",
     "redundancy",
 )
 
@@ -1380,6 +1381,8 @@ class DatasetAuditor:
         whitespace_check: bool = False,
         null_pattern_check: bool = False,
         null_pattern_threshold: float = DEFAULT_NULL_PATTERN_THRESHOLD,
+        max_category_share: float | None = None,
+        rare_category_share: float | None = None,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -1387,6 +1390,16 @@ class DatasetAuditor:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
         if not 0.0 <= null_pattern_threshold <= 1.0:
             raise ValueError("null_pattern_threshold must be between 0 and 1")
+        for name, value in (
+            ("max_category_share", max_category_share),
+            ("rare_category_share", rare_category_share),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 < float(value) <= 1.0
+            ):
+                raise ValueError(f"{name} must be a fraction between 0 and 1")
         for name, value in (
             ("min_rows", min_rows),
             ("max_rows", max_rows),
@@ -1425,6 +1438,12 @@ class DatasetAuditor:
         self.whitespace_check = whitespace_check
         self.null_pattern_check = null_pattern_check
         self.null_pattern_threshold = null_pattern_threshold
+        self.max_category_share = (
+            float(max_category_share) if max_category_share is not None else None
+        )
+        self.rare_category_share = (
+            float(rare_category_share) if rare_category_share is not None else None
+        )
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -1601,6 +1620,9 @@ class DatasetAuditor:
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
+
+        progress.advance("category_share")
+        self._check_category_share(data, issues)
 
         progress.advance("redundancy")
         # Redundancy / collinearity check
@@ -2085,6 +2107,71 @@ class DatasetAuditor:
                         threshold=threshold,
                     )
                 )
+
+    def _check_category_share(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Flag categorical columns dominated by or starved of values.
+
+        A column whose most frequent value accounts for more than
+        ``max_category_share`` of the non-missing values carries almost no
+        information, and one containing categories rarer than
+        ``rare_category_share`` usually means the class is too sparse to learn
+        from. Both thresholds are off unless configured.
+        """
+
+        if self.max_category_share is None and self.rare_category_share is None:
+            return
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
+            if not (
+                isinstance(col.dtype, pd.CategoricalDtype)
+                or col.dtype == object
+                or pd.api.types.is_string_dtype(col)
+            ):
+                continue
+            values = col.dropna().astype(str)
+            if len(values) == 0:
+                continue
+            shares = values.value_counts(normalize=True)
+            if self.max_category_share is not None:
+                top = str(shares.index[0])
+                top_share = float(shares.iloc[0])
+                if top_share > self.max_category_share:
+                    issues.append(
+                        AuditIssue(
+                            check="category_share",
+                            severity="warning",
+                            message=(
+                                f"Category '{top}' dominates column with "
+                                f"{top_share:.1%} of non-missing values "
+                                f"(allowed {self.max_category_share:.1%})."
+                            ),
+                            column=str(column),
+                            observed=round(top_share, 4),
+                            threshold=self.max_category_share,
+                        )
+                    )
+            if self.rare_category_share is not None:
+                rare = shares[shares < self.rare_category_share]
+                if len(rare):
+                    examples = ", ".join(repr(str(v)) for v in list(rare.index)[:5])
+                    issues.append(
+                        AuditIssue(
+                            check="category_share",
+                            severity="warning",
+                            message=(
+                                f"{len(rare)} rare category(ies) below the "
+                                f"{self.rare_category_share:.1%} share "
+                                f"(e.g., {examples})."
+                            ),
+                            column=str(column),
+                            observed=len(rare),
+                            threshold=self.rare_category_share,
+                        )
+                    )
 
     def _check_schema(
         self,

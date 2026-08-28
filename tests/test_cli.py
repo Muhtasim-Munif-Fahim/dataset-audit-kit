@@ -99,6 +99,59 @@ class TestWhitespaceFlag:
         assert "[FAIL]" in capsys.readouterr().out
 
 
+class TestCategoryShareCli:
+    @pytest.fixture
+    def dominant_csv(self, tmp_path):
+        # A distinct id column keeps duplicate-row warnings out of the picture.
+        path = tmp_path / "dominant.csv"
+        pd.DataFrame(
+            {"id": list(range(10)), "status": ["ok"] * 9 + ["no"]}
+        ).to_csv(path, index=False)
+        return str(path)
+
+    def test_audit_flags_dominance_only_when_configured(
+        self, dominant_csv, capsys
+    ) -> None:
+        assert main(["audit", dominant_csv, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "category_share"]
+
+        assert main(
+            ["audit", dominant_csv, "--json", "--max-category-share", "0.8"]
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert [i for i in payload["issues"] if i["check"] == "category_share"]
+
+    def test_rare_category_share_flag_is_wired_through(self, tmp_path, capsys) -> None:
+        path = tmp_path / "sparse.csv"
+        pd.DataFrame(
+            {"id": list(range(10)), "status": ["a"] * 8 + ["b"] + ["c"]}
+        ).to_csv(path, index=False)
+
+        assert main(
+            ["audit", str(path), "--json", "--rare-category-share", "0.15"]
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert [i for i in payload["issues"] if i["check"] == "category_share"]
+
+    def test_check_gate_counts_category_share_findings(
+        self, dominant_csv, capsys
+    ) -> None:
+        assert main(
+            ["check", dominant_csv, "--max-category-share", "0.8", "--minimal"]
+        ) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_out_of_range_share_is_a_usage_error(self, tmp_path, capsys) -> None:
+        path = tmp_path / "x.csv"
+        pd.DataFrame({"status": ["ok"]}).to_csv(path, index=False)
+
+        with pytest.raises(SystemExit) as exc:
+            main(["audit", str(path), "--max-category-share", "1.5"])
+        assert exc.value.code == 2
+        assert "between 0 and 1" in capsys.readouterr().err
+
+
 class TestExitCodes:
     def test_informational_findings_do_not_fail_the_audit(self, tmp_path, capsys) -> None:
         current = tmp_path / "cur.csv"
