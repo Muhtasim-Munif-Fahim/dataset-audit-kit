@@ -70,6 +70,7 @@ SENSITIVE_PATTERNS = (
 #: Ordered names of the audit phases, used for progress reporting.
 _AUDIT_PHASES = (
     "missingness",
+    "missing_cooccurrence",
     "duplicates",
     "column names",
     "schema",
@@ -1443,6 +1444,9 @@ class DatasetAuditor:
         sensitive_check: bool = False,
         max_category_share: float | None = None,
         rare_category_share: float | None = None,
+        missing_cooccurrence_check: bool = False,
+        missing_cooccurrence_min_count: int = 1,
+        missing_cooccurrence_top: int | None = 10,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -1450,6 +1454,18 @@ class DatasetAuditor:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
         if not 0.0 <= null_pattern_threshold <= 1.0:
             raise ValueError("null_pattern_threshold must be between 0 and 1")
+        if (
+            isinstance(missing_cooccurrence_min_count, bool)
+            or not isinstance(missing_cooccurrence_min_count, int)
+            or missing_cooccurrence_min_count < 1
+        ):
+            raise ValueError("missing_cooccurrence_min_count must be a positive integer")
+        if missing_cooccurrence_top is not None and (
+            isinstance(missing_cooccurrence_top, bool)
+            or not isinstance(missing_cooccurrence_top, int)
+            or missing_cooccurrence_top < 1
+        ):
+            raise ValueError("missing_cooccurrence_top must be a positive integer or None")
         for name, value in (
             ("max_category_share", max_category_share),
             ("rare_category_share", rare_category_share),
@@ -1505,6 +1521,9 @@ class DatasetAuditor:
         self.rare_category_share = (
             float(rare_category_share) if rare_category_share is not None else None
         )
+        self.missing_cooccurrence_check = missing_cooccurrence_check
+        self.missing_cooccurrence_min_count = missing_cooccurrence_min_count
+        self.missing_cooccurrence_top = missing_cooccurrence_top
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -1601,6 +1620,8 @@ class DatasetAuditor:
         progress = self._progress_reporter(data)
         progress.advance("missingness")
         missingness = self._missingness(data, issues)
+        progress.advance("missing_cooccurrence")
+        self._check_missing_cooccurrence(data, issues)
         missing_cells = int(data.isna().sum().sum())
         if (
             self.max_missing_cells is not None
@@ -1984,6 +2005,67 @@ class DatasetAuditor:
                     )
                 )
         return missingness
+
+    def _check_missing_cooccurrence(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Flag column pairs that are missing in the same rows.
+
+        Two columns that are empty together are rarely an accident: a derived
+        column computed from a sparsely populated source, a shared export bug,
+        or an optional field gated behind the same condition. The per-column
+        missingness check cannot see the pattern, so an opt-in scan looks at
+        every pair of columns with any missing values and reports those whose
+        missingness indicators are positively correlated. The score is the
+        Pearson correlation of the two boolean masks (the phi coefficient for
+        binary data), which reaches 1.0 when both columns are always empty
+        together and is undefined — reported as zero — when either column is
+        constant.
+        """
+
+        if not self.missing_cooccurrence_check:
+            return
+        missing_columns = [
+            column for column in data.columns if bool(data[column].isna().any())
+        ]
+        if len(missing_columns) < 2:
+            return
+
+        missing = data[missing_columns].isna()
+        pairs: list[tuple[int, float, str, str]] = []
+        for i in range(len(missing_columns)):
+            left = missing_columns[i]
+            for right in missing_columns[i + 1:]:
+                co_count = int((missing[left] & missing[right]).sum())
+                if co_count < self.missing_cooccurrence_min_count:
+                    continue
+                score = float(missing[left].corr(missing[right]))
+                if score != score:  # NaN: one mask is constant
+                    score = 0.0
+                pairs.append((co_count, score, str(left), str(right)))
+
+        # Most joined first, then most strongly correlated, then by name so
+        # the ordering stays deterministic across runs.
+        pairs.sort(key=lambda pair: (-pair[0], -pair[1], pair[2], pair[3]))
+        if self.missing_cooccurrence_top is not None:
+            pairs = pairs[: self.missing_cooccurrence_top]
+
+        for co_count, score, left, right in pairs:
+            issues.append(
+                AuditIssue(
+                    check="missing_cooccurrence",
+                    severity="warning",
+                    message=(
+                        f"Columns '{left}' and '{right}' are both missing in "
+                        f"{co_count} row(s) (missingness correlation {score:.2f})."
+                    ),
+                    column=f"{left},{right}",
+                    observed=co_count,
+                    threshold=self.missing_cooccurrence_min_count,
+                )
+            )
 
     def _check_column_names(self, data: pd.DataFrame, issues: list[AuditIssue]) -> None:
         """Flag column names that tend to break downstream tooling.

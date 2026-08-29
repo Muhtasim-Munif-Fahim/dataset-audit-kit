@@ -134,6 +134,88 @@ class TestSensitiveValueCheck:
         assert report.status == "warn"
 
 
+class TestMissingCooccurrence:
+    def test_co_missing_pairs_are_flagged_when_enabled(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": [1.0, None, 3.0, None, 5.0],
+                "b": ["x", None, "z", None, "w"],
+                "c": [10.0, 20.0, None, None, 50.0],
+            }
+        )
+        report = DatasetAuditor(missing_cooccurrence_check=True).audit_dataframe(data)
+        issue = next(i for i in report.issues if i.check == "missing_cooccurrence")
+        assert issue.observed == 2
+        assert "both missing in 2 row(s)" in issue.message
+        # Perfectly aligned missingness should score as a strong correlation.
+        assert issue.severity == "warning"
+
+    def test_positive_correlation_score_measures_alignment(self) -> None:
+        # Rows 1-4 are missing in both columns; rows 5-8 are complete in both.
+        data = pd.DataFrame(
+            {
+                "left": [None, None, None, None, 1.0, 2.0, 3.0, 4.0],
+                "right": [None, None, None, None, "a", "b", "c", "d"],
+            }
+        )
+        report = DatasetAuditor(missing_cooccurrence_check=True).audit_dataframe(data)
+        issue = next(i for i in report.issues if i.check == "missing_cooccurrence")
+        assert issue.observed == 4
+        assert "1.00" in issue.message
+
+    def test_independent_missingness_is_not_flagged(self) -> None:
+        # Missing cells never overlap, so the pair must not be reported.
+        data = pd.DataFrame(
+            {
+                "a": [None, 1.0, 2.0, 3.0],
+                "b": ["x", None, "y", "z"],
+            }
+        )
+        report = DatasetAuditor(missing_cooccurrence_check=True).audit_dataframe(data)
+        assert _messages(report, "missing_cooccurrence") == []
+
+    def test_min_count_filters_rare_overlaps(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": [None, None, 1.0, 1.0],
+                "b": [None, None, "x", "y"],
+                "c": [1.0, 2.0, None, None],
+            }
+        )
+        report = DatasetAuditor(
+            missing_cooccurrence_check=True, missing_cooccurrence_min_count=2
+        ).audit_dataframe(data)
+        messages = _messages(report, "missing_cooccurrence")
+        assert len(messages) == 1
+        assert "'a'" in messages[0] and "'b'" in messages[0]
+
+    def test_top_limit_caps_the_number_of_reported_pairs(self) -> None:
+        data = pd.DataFrame(
+            {
+                "a": [None, None, None, 1.0],
+                "b": [None, None, None, "x"],
+                "c": [None, None, 3.0, 4.0],
+            }
+        )
+        report = DatasetAuditor(
+            missing_cooccurrence_check=True, missing_cooccurrence_top=1
+        ).audit_dataframe(data)
+        assert len(_messages(report, "missing_cooccurrence")) == 1
+
+    def test_the_check_is_off_by_default(self) -> None:
+        data = pd.DataFrame(
+            {"a": [None, 1.0], "b": [None, "x"]}
+        )
+        report = DatasetAuditor().audit_dataframe(data)
+        assert _messages(report, "missing_cooccurrence") == []
+
+    def test_invalid_thresholds_are_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            DatasetAuditor(missing_cooccurrence_min_count=0)
+        with pytest.raises(ValueError):
+            DatasetAuditor(missing_cooccurrence_top=0)
+
+
 class TestUniqueness:
     def test_counts_every_redundant_row(self) -> None:
         # One value repeated three times leaves two redundant rows, and a value

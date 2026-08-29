@@ -189,6 +189,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Flag text values shaped like emails, phone numbers, or SSNs",
     )
     audit.add_argument(
+        "--check-missing-cooccurrence",
+        action="store_true",
+        help="Flag column pairs that are missing in the same rows",
+    )
+    audit.add_argument(
+        "--missing-cooccurrence-min-count",
+        type=int,
+        default=1,
+        help="Report only pairs both missing in at least this many rows (default: 1)",
+    )
+    audit.add_argument(
+        "--missing-cooccurrence-top",
+        type=int,
+        default=10,
+        help="Report at most this many co-missing pairs (default: 10)",
+    )
+    audit.add_argument(
         "--max-risk",
         type=_non_negative_float,
         default=None,
@@ -323,6 +340,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-sensitive",
         action="store_true",
         help="Flag text values shaped like emails, phone numbers, or SSNs",
+    )
+    check.add_argument(
+        "--check-missing-cooccurrence",
+        action="store_true",
+        help="Flag column pairs that are missing in the same rows",
+    )
+    check.add_argument(
+        "--missing-cooccurrence-min-count",
+        type=int,
+        default=1,
+        help="Report only pairs both missing in at least this many rows (default: 1)",
+    )
+    check.add_argument(
+        "--missing-cooccurrence-top",
+        type=int,
+        default=10,
+        help="Report at most this many co-missing pairs (default: 10)",
     )
     check.add_argument(
         "--progress",
@@ -705,6 +739,9 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         sensitive_check=getattr(args, "check_sensitive", False),
         max_category_share=getattr(args, "max_category_share", None),
         rare_category_share=getattr(args, "rare_category_share", None),
+        missing_cooccurrence_check=args.check_missing_cooccurrence,
+        missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
+        missing_cooccurrence_top=args.missing_cooccurrence_top,
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -871,6 +908,8 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "drift_threshold": args.drift_threshold,
         "whitespace_check": args.check_whitespace,
         "sensitive_check": getattr(args, "check_sensitive", False),
+        "missing_cooccurrence_check": args.check_missing_cooccurrence,
+        "missing_cooccurrence_min_count": args.missing_cooccurrence_min_count,
         "sample_rows": args.sample_rows,
         "sample_seed": args.seed,
         "label_column": args.label_column,
@@ -987,6 +1026,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
         sensitive_check=args.check_sensitive,
         max_category_share=getattr(args, "max_category_share", None),
         rare_category_share=getattr(args, "rare_category_share", None),
+        missing_cooccurrence_check=args.check_missing_cooccurrence,
+        missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
+        missing_cooccurrence_top=args.missing_cooccurrence_top,
     )
     report = auditor.audit_file(
         args.data,

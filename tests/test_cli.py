@@ -134,6 +134,57 @@ class TestSensitiveFlag:
         assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
 
 
+class TestMissingCooccurrenceFlag:
+    @pytest.fixture
+    def gappy_csv(self, tmp_path):
+        # One shared missing cell in 40 rows keeps per-column missingness below
+        # the 5% threshold, so the co-missing flag is the only thing that fails.
+        path = tmp_path / "gappy.csv"
+        pd.DataFrame(
+            {
+                "id": list(range(40)),
+                "a": [None] + [1.0] * 39,
+                "b": [None] + ["x"] * 39,
+            }
+        ).to_csv(path, index=False)
+        return str(path)
+
+    def test_co_missing_pairs_fail_only_when_enabled(self, gappy_csv, capsys) -> None:
+        assert main(["audit", gappy_csv, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "missing_cooccurrence"]
+        assert main(["audit", gappy_csv, "--json", "--check-missing-cooccurrence"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        finding = [i for i in payload["issues"] if i["check"] == "missing_cooccurrence"]
+        assert finding and "both missing in 1 row(s)" in finding[0]["message"]
+
+    def test_check_gate_counts_co_missing_findings(self, gappy_csv, capsys) -> None:
+        assert main(["check", gappy_csv]) == 0
+        assert main(["check", gappy_csv, "--check-missing-cooccurrence"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_min_count_flag_filters_rare_overlaps(self, gappy_csv, capsys) -> None:
+        assert main(
+            [
+                "audit", gappy_csv, "--json", "--check-missing-cooccurrence",
+                "--missing-cooccurrence-min-count", "3",
+            ]
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "missing_cooccurrence"]
+
+    def test_flag_is_part_of_the_report_fingerprint(self, gappy_csv, tmp_path) -> None:
+        first = tmp_path / "first.json"
+        second = tmp_path / "second.json"
+        assert main(["audit", gappy_csv, "--save-json", str(first)]) == 0
+        assert main(
+            ["audit", gappy_csv, "--check-missing-cooccurrence", "--save-json", str(second)]
+        ) == 1
+        baseline = json.loads(first.read_text(encoding="utf-8"))
+        enabled = json.loads(second.read_text(encoding="utf-8"))
+        assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
+
+
 class TestCategoryShareCli:
     @pytest.fixture
     def dominant_csv(self, tmp_path):
