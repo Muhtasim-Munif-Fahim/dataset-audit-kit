@@ -489,6 +489,73 @@ class TestBatchAuditing:
         assert set(payload["files"]) == {str(first), str(second)}
 
 
+class TestBatchConsistency:
+    def _batch(self, tmp_path, frames) -> BatchAuditReport:
+        paths = []
+        for name, frame in frames.items():
+            path = tmp_path / name
+            frame.to_csv(path, index=False)
+            paths.append(str(path))
+        return DatasetAuditor().audit_many(paths)
+
+    def test_matching_schemas_are_consistent(self, tmp_path) -> None:
+        batch = self._batch(
+            tmp_path,
+            {
+                "a.csv": pd.DataFrame({"x": [1, 2], "y": ["p", "q"]}),
+                "b.csv": pd.DataFrame({"x": [3], "y": ["r"]}),
+            },
+        )
+        consistency = batch.consistency()
+        assert consistency["consistent"] is True
+        assert consistency["reference"] == str(tmp_path / "a.csv")
+        assert all(entry["status"] == "ok" for entry in consistency["files"].values())
+
+    def test_missing_column_is_reported(self, tmp_path) -> None:
+        batch = self._batch(
+            tmp_path,
+            {
+                "a.csv": pd.DataFrame({"x": [1], "y": ["p"]}),
+                "b.csv": pd.DataFrame({"x": [2]}),
+            },
+        )
+        consistency = batch.consistency()
+        assert consistency["consistent"] is False
+        b = consistency["files"][str(tmp_path / "b.csv")]
+        assert b["status"] == "deviates"
+        assert any(detail == "missing y" for detail in b["details"])
+
+    def test_extra_column_is_reported(self, tmp_path) -> None:
+        batch = self._batch(
+            tmp_path,
+            {
+                "a.csv": pd.DataFrame({"x": [1]}),
+                "b.csv": pd.DataFrame({"x": [2], "z": ["q"]}),
+            },
+        )
+        consistency = batch.consistency()
+        b = consistency["files"][str(tmp_path / "b.csv")]
+        assert any(detail == "extra z" for detail in b["details"])
+
+    def test_reordered_columns_are_reported(self, tmp_path) -> None:
+        batch = self._batch(
+            tmp_path,
+            {
+                "a.csv": pd.DataFrame({"x": [1], "y": ["p"]}),
+                "b.csv": pd.DataFrame({"y": ["q"], "x": [2]}),
+            },
+        )
+        consistency = batch.consistency()
+        assert consistency["consistent"] is False
+        b = consistency["files"][str(tmp_path / "b.csv")]
+        assert any("different order" in detail for detail in b["details"])
+
+    def test_empty_batch_is_consistent(self) -> None:
+        consistency = BatchAuditReport().consistency()
+        assert consistency["consistent"] is True
+        assert consistency["reference"] is None
+
+
 class TestRendering:
     def test_csv_contains_a_stable_flat_findings_schema(self) -> None:
         report = AuditReport(rows=2, columns=1, duplicate_rows=1, missing_cells=0)

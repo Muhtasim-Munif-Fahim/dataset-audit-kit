@@ -293,6 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the batch report as JSON instead of the rollup table",
     )
+    audit_glob.add_argument(
+        "--check-consistency",
+        action="store_true",
+        help="Require every file to share the same columns in the same order; "
+             "report and fail on deviations from the first file",
+    )
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
@@ -979,9 +985,15 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
         encoding=getattr(args, "encoding", None),
         delimiter=getattr(args, "delimiter", None),
     )
+    consistency = batch.consistency() if args.check_consistency else None
 
     if args.json:
-        print(batch.to_json())
+        import json
+
+        payload = json.loads(batch.to_json())
+        if consistency is not None:
+            payload["consistency"] = consistency
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         width = max(len(path) for path in batch.reports)
         for path, report in batch.reports.items():
@@ -1004,8 +1016,34 @@ def _cmd_audit_glob(args: argparse.Namespace) -> int:
             )
             summary += f"; worst checks: {worst}"
         print(summary)
+        if consistency is not None:
+            _print_consistency(consistency)
 
+    if consistency is not None and not consistency["consistent"]:
+        return 1
     return batch.exit_code(args.fail_on, max_risk=args.max_risk)
+
+
+def _print_consistency(consistency: dict[str, object]) -> None:
+    """Render the batch column-consistency summary under the rollup table."""
+
+    files = consistency["files"]
+    print()
+    if len(files) <= 1:
+        print("column consistency: no other files to compare against.")
+        return
+    reference = consistency["reference"]
+    print(f"column consistency: {len(files) - 1} file(s) compared against '{reference}'")
+    for path, entry in files.items():
+        if path == reference:
+            continue
+        status = "ok" if entry["status"] == "ok" else "DEVIATES"
+        detail = "; ".join(entry["details"]) if entry["details"] else "same columns, same order"
+        print(f"  {path}: [{status}] {detail}")
+    if consistency["consistent"]:
+        print("  all files share the same columns in the same order")
+    else:
+        print("  columns differ between files")
 
 
 def _cmd_check(args: argparse.Namespace) -> int:

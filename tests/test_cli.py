@@ -383,6 +383,61 @@ class TestGlobRollup:
         assert set(payload["files"]) == {str(mixed_dir / "bad.csv"), str(mixed_dir / "good.csv")}
 
 
+class TestAuditGlobConsistency:
+    def test_consistent_glob_passes(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"x": [1, 2], "y": ["p", "q"]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"x": [3, 4], "y": ["r", "s"]}).to_csv(tmp_path / "b.csv", index=False)
+
+        code = main(["audit-glob", str(tmp_path / "*.csv"), "--check-consistency"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "all files share the same columns in the same order" in out
+
+    def test_divergent_schema_fails_the_batch(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"x": [1], "y": ["p"]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"x": [2], "z": ["q"]}).to_csv(tmp_path / "b.csv", index=False)
+
+        code = main(["audit-glob", str(tmp_path / "*.csv"), "--check-consistency"])
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "[DEVIATES]" in out
+        assert "missing y" in out
+        assert "extra z" in out
+        assert "columns differ between files" in out
+
+    def test_reordered_columns_fail_too(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"x": [1], "y": ["p"]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"y": ["q"], "x": [2]}).to_csv(tmp_path / "b.csv", index=False)
+
+        assert main(["audit-glob", str(tmp_path / "*.csv"), "--check-consistency"]) == 1
+        assert "different order" in capsys.readouterr().out
+
+    def test_consistency_is_optional(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"x": [1]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"x": [2], "z": ["q"]}).to_csv(tmp_path / "b.csv", index=False)
+
+        # Without the flag the batch only reports what each file says about
+        # itself, so the schema divergence goes unnoticed.
+        assert main(["audit-glob", str(tmp_path / "*.csv")]) == 0
+        out = capsys.readouterr().out
+        assert "column consistency" not in out
+
+    def test_json_output_carries_the_consistency_summary(self, tmp_path, capsys) -> None:
+        pd.DataFrame({"x": [1], "y": ["p"]}).to_csv(tmp_path / "a.csv", index=False)
+        pd.DataFrame({"x": [2]}).to_csv(tmp_path / "b.csv", index=False)
+
+        code = main(
+            ["audit-glob", str(tmp_path / "*.csv"), "--check-consistency", "--json"]
+        )
+        assert code == 1
+        payload = json.loads(capsys.readouterr().out)
+        consistency = payload["consistency"]
+        assert consistency["consistent"] is False
+        b = consistency["files"][str(tmp_path / "b.csv")]
+        assert b["status"] == "deviates"
+        assert any(detail == "missing y" for detail in b["details"])
+
+
 class TestRiskGate:
     def test_check_tolerates_warnings_until_they_pile_up(self, tmp_path, capsys) -> None:
         path = tmp_path / "gaps.csv"

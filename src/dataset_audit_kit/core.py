@@ -1449,6 +1449,49 @@ class BatchAuditReport:
                 counts[issue.check] = counts.get(issue.check, 0) + 1
         return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
+    def consistency(self) -> dict[str, object]:
+        """Compare column sets and order across every audited file.
+
+        The first file in the batch is the reference schema; every later file
+        is checked against it for columns that are missing, columns that were
+        added, and ordering changes. A batch of daily exports that silently
+        loses or reorders a column slips past per-file audits, because each
+        file alone looks fine, but the consistency report surfaces it.
+
+        Returns a summary with the reference path, whether the batch is
+        consistent, and per-file status plus a human-readable detail list.
+        """
+
+        paths = list(self.reports)
+        summary: dict[str, object] = {
+            "reference": paths[0] if paths else None,
+            "consistent": True,
+            "files": {},
+        }
+        if not paths:
+            return summary
+        reference_columns = list(self.reports[paths[0]].column_profiles)
+        for path in paths:
+            columns = list(self.reports[path].column_profiles)
+            missing = [column for column in reference_columns if column not in columns]
+            extra = [column for column in columns if column not in reference_columns]
+            reordered = not missing and not extra and columns != reference_columns
+            if path != paths[0] and (missing or extra or reordered):
+                summary["consistent"] = False
+            details: list[str] = []
+            if missing:
+                details.append(f"missing {', '.join(missing)}")
+            if extra:
+                details.append(f"extra {', '.join(extra)}")
+            if reordered:
+                details.append("same columns in a different order")
+            summary["files"][path] = {
+                "columns": columns,
+                "status": "ok" if not (missing or extra or reordered) else "deviates",
+                "details": details,
+            }
+        return summary
+
     def to_dict(self) -> dict[str, object]:
         return {
             "status": self.status,
