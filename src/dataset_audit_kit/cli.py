@@ -1563,6 +1563,8 @@ def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
             "max_value": 100.0,
             "max_missing_ratio": 0.05,
             "max_outlier_ratio": 0.05,
+            # Alternative to the IQR rule: count outliers beyond quantile fences.
+            # "percentile_fences": [0.01, 0.99],
         },
         # Relational constraints between pairs of columns (optional)
         "cross": [

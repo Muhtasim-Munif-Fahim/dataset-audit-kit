@@ -209,7 +209,13 @@ class ColumnRule:
         When True, values that parse to a date after the current date are
         flagged.
     max_outlier_ratio : float | None
-        Maximum fraction of numeric values allowed outside the IQR fences.
+        Maximum fraction of numeric values allowed outside the outlier fences.
+        Without ``percentile_fences`` the fences are the standard IQR fences;
+        with them they are the configured quantiles of the observed values.
+    percentile_fences : tuple[float, float] | None
+        Lower and upper quantiles used as outlier fences, for example
+        ``[0.01, 0.99]``. When set, values below the lower quantile or above
+        the upper quantile count as outliers instead of the IQR rule.
     max_drift : float | None
         Maximum drift score allowed for this column when a reference dataset is
         supplied. Overrides the auditor-wide ``drift_threshold``.
@@ -235,6 +241,7 @@ class ColumnRule:
     max_date: str | None = None
     no_future_dates: bool = False
     max_outlier_ratio: float | None = None
+    percentile_fences: tuple[float, float] | None = None
     max_drift: float | None = None
 
 
@@ -325,6 +332,34 @@ class ValidationRules:
                     raise ValueError(
                         f"max_outlier_ratio for column '{col_name}' must be between 0 and 1"
                     )
+            percentile_fences = col_config.get("percentile_fences")
+            if percentile_fences is not None:
+                if (
+                    isinstance(percentile_fences, (bool, str))
+                    or not isinstance(percentile_fences, (list, tuple))
+                    or len(percentile_fences) != 2
+                ):
+                    raise ValueError(
+                        f"percentile_fences for column '{col_name}' must be a two-element list"
+                    )
+                parsed_fences: list[float] = []
+                for quantile in percentile_fences:
+                    if (
+                        isinstance(quantile, bool)
+                        or not isinstance(quantile, (int, float))
+                        or not 0.0 <= float(quantile) <= 1.0
+                    ):
+                        raise ValueError(
+                            f"percentile_fences for column '{col_name}' must "
+                            "contain fractions between 0 and 1"
+                        )
+                    parsed_fences.append(float(quantile))
+                if parsed_fences[0] >= parsed_fences[1]:
+                    raise ValueError(
+                        f"percentile_fences lower bound must be below the upper "
+                        f"bound for column '{col_name}'"
+                    )
+                percentile_fences = tuple(parsed_fences)
             value_tolerance = col_config.get("value_tolerance", 0.0)
             if value_tolerance is not None:
                 if (
@@ -418,6 +453,7 @@ class ValidationRules:
                     if max_outlier_ratio is not None
                     else None
                 ),
+                percentile_fences=percentile_fences,
                 max_drift=float(max_drift) if max_drift is not None else None,
             )
         cross_rules: list[CrossColumnRule] = []
@@ -557,6 +593,8 @@ class ValidationRules:
                 value = getattr(rule, attr)
                 if value is not None:
                     entry[attr] = value
+            if rule.percentile_fences is not None:
+                entry["percentile_fences"] = list(rule.percentile_fences)
             if rule.ignore_case:
                 entry["ignore_case"] = True
             if rule.no_future_dates:
@@ -2711,20 +2749,31 @@ class DatasetAuditor:
                             )
                         )
 
-            # --- IQR outlier allowance ---
+            # --- outlier allowance (IQR or percentile fences) ---
             if (
                 rule.max_outlier_ratio is not None
                 or rule.min_value is not None
                 or rule.max_value is not None
+                or rule.percentile_fences is not None
             ):
                 numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
                 if len(numeric) >= 4:
-                    q1 = float(numeric.quantile(0.25))
-                    q3 = float(numeric.quantile(0.75))
-                    iqr = q3 - q1
-                    if iqr > 0:
-                        lower_fence = q1 - 1.5 * iqr
-                        upper_fence = q3 + 1.5 * iqr
+                    if rule.percentile_fences is not None:
+                        lower_q, upper_q = rule.percentile_fences
+                        lower_fence = float(numeric.quantile(lower_q))
+                        upper_fence = float(numeric.quantile(upper_q))
+                        method_label = "percentile"
+                    else:
+                        q1 = float(numeric.quantile(0.25))
+                        q3 = float(numeric.quantile(0.75))
+                        iqr = q3 - q1
+                        if iqr <= 0:
+                            lower_fence = upper_fence = None
+                        else:
+                            lower_fence = q1 - 1.5 * iqr
+                            upper_fence = q3 + 1.5 * iqr
+                        method_label = "IQR"
+                    if lower_fence is not None and upper_fence is not None:
                         # Bounds act as a hard fence for outlier counting, so
                         # the tolerance slack applies to them just as it does
                         # to the bound check itself.
@@ -2751,12 +2800,12 @@ class DatasetAuditor:
                         if total_outliers > 0 and outlier_ratio > allowed_ratio:
                             if rule.max_outlier_ratio is None:
                                 message = (
-                                    f"{total_outliers} IQR outlier(s) detected "
+                                    f"{total_outliers} {method_label} outlier(s) detected "
                                     f"({outlier_ratio * 100:.1f}% of values)."
                                 )
                             else:
                                 message = (
-                                    f"IQR outlier ratio {outlier_ratio:.1%} exceeds allowed "
+                                    f"{method_label} outlier ratio {outlier_ratio:.1%} exceeds allowed "
                                     f"{allowed_ratio:.1%} ({total_outliers} value(s))."
                                 )
                             issues.append(

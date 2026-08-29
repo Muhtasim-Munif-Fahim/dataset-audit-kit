@@ -538,6 +538,34 @@ class TestNumericBoundModesCli:
         assert "1 column rule(s)" in capsys.readouterr().out
 
 
+class TestPercentileFencesCli:
+    def test_percentile_fences_apply_from_a_rules_file(self, tmp_path, capsys) -> None:
+        path = tmp_path / "scores.csv"
+        pd.DataFrame({"score": list(range(1, 101))}).to_csv(path, index=False)
+
+        rules = tmp_path / "fences.json"
+        rules.write_text(
+            json.dumps(
+                {"score": {"percentile_fences": [0.05, 0.95], "max_outlier_ratio": 0.05}}
+            ),
+            encoding="utf-8",
+        )
+        # The outlier note is informational, so the run itself passes.
+        assert main(["audit", str(path), "--json", "--rules", str(rules)]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        messages = [i["message"] for i in payload["issues"] if i["check"] == "rule"]
+        assert any("percentile outlier ratio 10.0% exceeds allowed 5.0%" in m for m in messages)
+
+    def test_validate_config_rejects_malformed_fences(self, tmp_path, capsys) -> None:
+        rules = tmp_path / "bad_fences.json"
+        rules.write_text(
+            json.dumps({"score": {"percentile_fences": [0.9, 0.1]}}),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules)]) == 1
+        assert "below the upper" in capsys.readouterr().err
+
+
 class TestDateRangeRulesCli:
     def test_date_bounds_from_a_rules_file_change_the_gate(self, tmp_path, capsys) -> None:
         path = tmp_path / "events.csv"

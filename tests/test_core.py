@@ -821,6 +821,71 @@ class TestOutlierRatioRules:
             ValidationRules.from_dict({"score": {"max_outlier_ratio": 1.1}})
 
 
+class TestPercentileOutlierFences:
+    def test_flags_values_beyond_configured_quantiles(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"score": {"percentile_fences": [0.05, 0.95], "max_outlier_ratio": 0.05}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"score": list(range(1, 101))})
+        )
+
+        issue = next(i for i in report.issues if i.column == "score")
+        assert issue.observed == 10
+        assert issue.severity == "info"
+        assert "percentile outlier ratio 10.0% exceeds allowed 5.0%" in issue.message
+
+    def test_iqr_does_not_flag_the_same_data(self) -> None:
+        # A uniform 1..100 range has no IQR outliers, but 10 values sit beyond
+        # the 5th and 95th percentiles, so the methods genuinely differ.
+        rules = ValidationRules.from_dict(
+            {"score": {"max_outlier_ratio": 0.05}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"score": list(range(1, 101))})
+        )
+        assert [i for i in report.issues if i.column == "score"] == []
+
+    def test_ratio_below_threshold_stays_silent(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"score": {"percentile_fences": [0.05, 0.95], "max_outlier_ratio": 0.15}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"score": list(range(1, 101))})
+        )
+        assert [i for i in report.issues if i.column == "score"] == []
+
+    def test_percentile_fences_alone_trigger_the_informational_note(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"score": {"percentile_fences": [0.05, 0.95]}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"score": list(range(1, 101))})
+        )
+        issue = next(i for i in report.issues if i.column == "score")
+        assert issue.severity == "info"
+        assert "10 percentile outlier(s) detected" in issue.message
+
+    def test_fences_round_trip_through_the_rule_dictionary(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"score": {"percentile_fences": [0.01, 0.99]}}
+        )
+        assert rules.columns["score"].percentile_fences == (0.01, 0.99)
+        assert rules.to_dict()["score"]["percentile_fences"] == [0.01, 0.99]
+
+    def test_invalid_fences_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="percentile_fences"):
+            ValidationRules.from_dict({"score": {"percentile_fences": 5}})
+        with pytest.raises(ValueError, match="percentile_fences"):
+            ValidationRules.from_dict({"score": {"percentile_fences": [0.01]}})
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            ValidationRules.from_dict({"score": {"percentile_fences": [0.0, 1.5]}})
+        with pytest.raises(ValueError, match="below the upper"):
+            ValidationRules.from_dict({"score": {"percentile_fences": [0.9, 0.1]}})
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            ValidationRules.from_dict({"score": {"percentile_fences": [True, 0.99]}})
+
+
 class TestNumericBoundModes:
     def test_bounds_are_inclusive_by_default(self) -> None:
         rules = ValidationRules.from_dict({"n": {"min_value": 0.0, "max_value": 10.0}})
