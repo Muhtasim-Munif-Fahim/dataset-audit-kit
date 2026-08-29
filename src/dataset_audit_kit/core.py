@@ -186,6 +186,17 @@ class ColumnRule:
         Minimum number of characters allowed for each non-missing value.
     max_length : int | None
         Maximum number of characters allowed for each non-missing value.
+    min_date : str | None
+        Earliest allowed date, as a parseable date string such as
+        ``"2020-01-01"``. Values that parse to a date strictly before this
+        bound are flagged.
+    max_date : str | None
+        Latest allowed date, as a parseable date string such as
+        ``"2030-12-31"``. Values that parse to a date strictly after this
+        bound are flagged.
+    no_future_dates : bool
+        When True, values that parse to a date after the current date are
+        flagged.
     max_outlier_ratio : float | None
         Maximum fraction of numeric values allowed outside the IQR fences.
     max_drift : float | None
@@ -209,6 +220,9 @@ class ColumnRule:
     date_format: str | None = None
     min_length: int | None = None
     max_length: int | None = None
+    min_date: str | None = None
+    max_date: str | None = None
+    no_future_dates: bool = False
     max_outlier_ratio: float | None = None
     max_drift: float | None = None
 
@@ -336,6 +350,34 @@ class ValidationRules:
                     raise ValueError(
                         f"max_drift for column '{col_name}' must be a non-negative number"
                     )
+            min_date = col_config.get("min_date")
+            max_date = col_config.get("max_date")
+            for bound, label in ((min_date, "min_date"), (max_date, "max_date")):
+                if bound is None:
+                    continue
+                if isinstance(bound, bool) or not isinstance(bound, str):
+                    raise ValueError(
+                        f"{label} for column '{col_name}' must be a date string"
+                    )
+                try:
+                    pd.Timestamp(bound)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(
+                        f"{label} for column '{col_name}' must be a parseable date: {exc}"
+                    ) from exc
+            if (
+                min_date is not None
+                and max_date is not None
+                and pd.Timestamp(min_date) > pd.Timestamp(max_date)
+            ):
+                raise ValueError(
+                    f"min_date cannot exceed max_date for column '{col_name}'"
+                )
+            no_future_dates = col_config.get("no_future_dates", False)
+            if not isinstance(no_future_dates, bool):
+                raise ValueError(
+                    f"no_future_dates for column '{col_name}' must be a boolean"
+                )
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -357,6 +399,9 @@ class ValidationRules:
                 ),
                 min_length=integer_bounds["min_length"],
                 max_length=integer_bounds["max_length"],
+                min_date=min_date,
+                max_date=max_date,
+                no_future_dates=no_future_dates,
                 max_outlier_ratio=(
                     float(max_outlier_ratio)
                     if max_outlier_ratio is not None
@@ -493,6 +538,8 @@ class ValidationRules:
                 "date_format",
                 "min_length",
                 "max_length",
+                "min_date",
+                "max_date",
                 "max_outlier_ratio",
                 "max_drift",
             ):
@@ -501,6 +548,8 @@ class ValidationRules:
                     entry[attr] = value
             if rule.ignore_case:
                 entry["ignore_case"] = True
+            if rule.no_future_dates:
+                entry["no_future_dates"] = True
             if not rule.min_inclusive:
                 entry["min_inclusive"] = False
             if not rule.max_inclusive:
@@ -2662,6 +2711,103 @@ class DatasetAuditor:
                             observed=violations,
                         )
                     )
+
+            # --- date-range bounds ---
+            if (
+                rule.min_date is not None
+                or rule.max_date is not None
+                or rule.no_future_dates
+            ):
+                from datetime import datetime
+
+                lower_bound = None
+                if rule.min_date is not None:
+                    try:
+                        lower_bound = pd.Timestamp(rule.min_date)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError(
+                            f"Invalid min_date for column '{column_name}': {exc}"
+                        ) from exc
+                upper_bound = None
+                if rule.max_date is not None:
+                    try:
+                        upper_bound = pd.Timestamp(rule.max_date)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError(
+                            f"Invalid max_date for column '{column_name}': {exc}"
+                        ) from exc
+                if (
+                    lower_bound is not None
+                    and upper_bound is not None
+                    and lower_bound > upper_bound
+                ):
+                    raise ValueError(
+                        f"min_date cannot exceed max_date for column '{column_name}'"
+                    )
+
+                raw = col_data.dropna()
+                if raw.empty:
+                    continue
+                if rule.date_format is not None:
+                    parsed_values: list[pd.Timestamp | None] = []
+                    for value in raw.astype(str):
+                        try:
+                            parsed_values.append(
+                                pd.Timestamp(datetime.strptime(value, rule.date_format))
+                            )
+                        except (ValueError, TypeError):
+                            parsed_values.append(None)
+                    parsed = pd.Series(parsed_values, index=raw.index)
+                else:
+                    parsed = pd.to_datetime(raw, errors="coerce")
+                if not parsed.notna().any():
+                    continue
+                if lower_bound is not None:
+                    violations = int((parsed < lower_bound).sum())
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"{violations} value(s) before minimum date "
+                                    f"'{rule.min_date}'."
+                                ),
+                                column=column_name,
+                                observed=violations,
+                            )
+                        )
+                if upper_bound is not None:
+                    violations = int((parsed > upper_bound).sum())
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"{violations} value(s) after maximum date "
+                                    f"'{rule.max_date}'."
+                                ),
+                                column=column_name,
+                                observed=violations,
+                            )
+                        )
+                if rule.no_future_dates:
+                    now = pd.Timestamp.now()
+                    violations = int((parsed > now).sum())
+                    if violations:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"{violations} value(s) lie in the future "
+                                    f"(after {now.date()})."
+                                ),
+                                column=column_name,
+                                observed=violations,
+                            )
+                        )
 
     def _check_cross_rules(
         self,

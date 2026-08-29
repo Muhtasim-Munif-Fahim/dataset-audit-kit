@@ -1495,6 +1495,11 @@ def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
             "dtype": "string",
             # strptime format that every non-missing value must parse as a datetime
             "date_format": "%Y-%m-%d",
+            # Earliest and latest allowed dates (parseable date strings)
+            "min_date": "2020-01-01",
+            "max_date": "2030-12-31",
+            # Flag values dated after the current date
+            "no_future_dates": False,
             "max_missing_ratio": 0.01,
         },
         "score": {

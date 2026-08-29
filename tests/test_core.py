@@ -13,6 +13,7 @@ from dataset_audit_kit.core import (
     AuditIssue,
     AuditReport,
     BatchAuditReport,
+    ColumnRule,
     DatasetAuditor,
     DatasetBaseline,
     ValidationRules,
@@ -556,6 +557,122 @@ class TestStringLengthRules:
 
         with pytest.raises(ValueError, match="min_length cannot exceed max_length"):
             ValidationRules.from_dict({"code": {"min_length": 5, "max_length": 4}})
+
+
+class TestDateRangeRules:
+    def test_reports_values_outside_configured_date_range(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"min_date": "2020-01-01", "max_date": "2020-12-31"}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2019-06-01", "2020-06-01", "2021-06-01", None]})
+        )
+
+        messages = _messages(report, "rule")
+        assert "1 value(s) before minimum date '2020-01-01'." in messages
+        assert "1 value(s) after maximum date '2020-12-31'." in messages
+
+    def test_boundary_values_are_accepted(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"min_date": "2020-01-01", "max_date": "2020-12-31"}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2020-01-01", "2020-12-31"]})
+        )
+        assert _messages(report, "rule") == []
+
+    def test_future_dates_flagged_when_enabled(self) -> None:
+        rules = ValidationRules.from_dict({"when": {"no_future_dates": True}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2020-06-01", "2050-06-01"]})
+        )
+
+        messages = _messages(report, "rule")
+        assert any("lie in the future" in message for message in messages)
+        assert [issue.observed for issue in report.issues if issue.check == "rule"] == [1]
+
+    def test_past_dates_pass_the_future_check(self) -> None:
+        rules = ValidationRules.from_dict({"when": {"no_future_dates": True}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2015-06-01", "2020-06-01"]})
+        )
+        assert _messages(report, "rule") == []
+
+    def test_missing_and_unparseable_values_are_skipped(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"min_date": "2020-01-01", "max_date": "2020-12-31"}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": [None, "2020-06-01", "not-a-date"]})
+        )
+        assert _messages(report, "rule") == []
+
+    def test_applies_to_datetime_dtype_columns(self) -> None:
+        rules = ValidationRules.from_dict({"when": {"max_date": "2020-12-31"}})
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": pd.to_datetime(["2020-06-01", "2021-06-01"])})
+        )
+
+        messages = _messages(report, "rule")
+        assert "1 value(s) after maximum date '2020-12-31'." in messages
+
+    def test_honours_configured_date_format(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_format": "%Y-%m-%d", "min_date": "2020-01-01"}}
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2019-06-01", "2020-06-01", "31/12/2019"]})
+        )
+
+        messages = _messages(report, "rule")
+        assert "1 value(s) before minimum date '2020-01-01'." in messages
+
+    def test_invalid_bound_raises(self) -> None:
+        with pytest.raises(ValueError, match="min_date"):
+            ValidationRules.from_dict({"when": {"min_date": "not-a-date"}})
+
+    def test_invalid_bound_constructed_directly_raises_at_audit_time(self) -> None:
+        rules = ValidationRules(
+            columns={"when": ColumnRule(name="when", min_date="not-a-date")}
+        )
+        with pytest.raises(ValueError, match="Invalid min_date"):
+            DatasetAuditor(rules=rules).audit_dataframe(
+                pd.DataFrame({"when": ["2020-06-01"]})
+            )
+
+    def test_min_exceeding_max_raises(self) -> None:
+        with pytest.raises(ValueError, match="min_date cannot exceed max_date"):
+            ValidationRules.from_dict(
+                {"when": {"min_date": "2021-01-01", "max_date": "2020-01-01"}}
+            )
+
+    def test_non_string_bounds_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="min_date"):
+            ValidationRules.from_dict({"when": {"min_date": 20200101}})
+
+    def test_round_trips_through_json(self, tmp_path) -> None:
+        path = tmp_path / "rules.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "when": {
+                        "min_date": "2020-01-01",
+                        "max_date": "2020-12-31",
+                        "no_future_dates": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        rules = ValidationRules.from_json(str(path))
+        assert rules.columns["when"].min_date == "2020-01-01"
+        assert rules.columns["when"].max_date == "2020-12-31"
+        assert rules.columns["when"].no_future_dates is True
+        assert rules.to_dict()["when"] == {
+            "min_date": "2020-01-01",
+            "max_date": "2020-12-31",
+            "no_future_dates": True,
+        }
 
 
 class TestOutlierRatioRules:

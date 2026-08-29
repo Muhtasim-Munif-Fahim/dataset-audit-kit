@@ -452,6 +452,52 @@ class TestNumericBoundModesCli:
         assert "1 column rule(s)" in capsys.readouterr().out
 
 
+class TestDateRangeRulesCli:
+    def test_date_bounds_from_a_rules_file_change_the_gate(self, tmp_path, capsys) -> None:
+        path = tmp_path / "events.csv"
+        pd.DataFrame({"when": ["2021-06-01", "2022-06-01", "2019-06-01"]}).to_csv(
+            path, index=False
+        )
+
+        rules = tmp_path / "dates.json"
+        rules.write_text(
+            json.dumps(
+                {"when": {"min_date": "2020-01-01", "max_date": "2020-12-31"}}
+            ),
+            encoding="utf-8",
+        )
+        assert main(["check", str(path), "--rules", str(rules), "--minimal"]) == 1
+        out = capsys.readouterr()
+        assert "[FAIL]" in out.out
+
+    def test_future_dates_rule_flags_out_of_range_values(self, tmp_path, capsys) -> None:
+        path = tmp_path / "events.csv"
+        pd.DataFrame({"when": ["2020-06-01", "2050-06-01"]}).to_csv(path, index=False)
+
+        rules = tmp_path / "future.json"
+        rules.write_text(json.dumps({"when": {"no_future_dates": True}}), encoding="utf-8")
+        assert main(["check", str(path), "--rules", str(rules), "--minimal"]) == 1
+        out = capsys.readouterr()
+        assert "[FAIL]" in out.out
+
+    def test_validate_config_accepts_date_bounds(self, tmp_path, capsys) -> None:
+        rules = tmp_path / "dates.json"
+        rules.write_text(
+            json.dumps(
+                {
+                    "when": {
+                        "min_date": "2020-01-01",
+                        "max_date": "2020-12-31",
+                        "no_future_dates": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules)]) == 0
+        assert "1 column rule(s)" in capsys.readouterr().out
+
+
 class TestValidateConfig:
 
     @pytest.fixture
