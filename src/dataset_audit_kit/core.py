@@ -58,6 +58,15 @@ NULL_PATTERNS = frozenset({
 #: Lowercased version for case-insensitive matching.
 NULL_PATTERNS_LOWER = {p.lower() for p in NULL_PATTERNS}
 
+#: (kind, compiled regex) pairs scanned by the opt-in sensitive-data check.
+#: The patterns are heuristics for obvious PII shapes in text columns, not
+#: guarantees: matches should be confirmed before acting on them.
+SENSITIVE_PATTERNS = (
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    ("phone", re.compile(r"(?<!\d)\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}(?!\d)")),
+    ("ssn", re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")),
+)
+
 #: Ordered names of the audit phases, used for progress reporting.
 _AUDIT_PHASES = (
     "missingness",
@@ -70,6 +79,7 @@ _AUDIT_PHASES = (
     "rules",
     "whitespace",
     "null_patterns",
+    "sensitive",
     "profiles",
     "category_share",
     "redundancy",
@@ -1430,6 +1440,7 @@ class DatasetAuditor:
         whitespace_check: bool = False,
         null_pattern_check: bool = False,
         null_pattern_threshold: float = DEFAULT_NULL_PATTERN_THRESHOLD,
+        sensitive_check: bool = False,
         max_category_share: float | None = None,
         rare_category_share: float | None = None,
     ) -> None:
@@ -1487,6 +1498,7 @@ class DatasetAuditor:
         self.whitespace_check = whitespace_check
         self.null_pattern_check = null_pattern_check
         self.null_pattern_threshold = null_pattern_threshold
+        self.sensitive_check = sensitive_check
         self.max_category_share = (
             float(max_category_share) if max_category_share is not None else None
         )
@@ -1666,6 +1678,10 @@ class DatasetAuditor:
         progress.advance("null_patterns")
         if self.null_pattern_check:
             self._check_null_patterns(data, issues, threshold=self.null_pattern_threshold)
+
+        progress.advance("sensitive")
+        if self.sensitive_check:
+            self._check_sensitive_values(data, issues)
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
@@ -2156,6 +2172,47 @@ class DatasetAuditor:
                         threshold=threshold,
                     )
                 )
+
+    def _check_sensitive_values(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Flag text values shaped like email, phone, or SSN records.
+
+        Opt-in because false positives are possible: a code column could
+        legitimately contain ``123-456-7890``. The scan is meant to surface
+        payloads that need a data-governance decision, so each flagged column
+        names the pattern kind and the number of matching values.
+        """
+
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
+            if not (
+                isinstance(col.dtype, pd.CategoricalDtype)
+                or col.dtype == object
+                or pd.api.types.is_string_dtype(col)
+            ):
+                continue
+            values = col.dropna().astype(str)
+            if values.empty:
+                continue
+            for kind, pattern in SENSITIVE_PATTERNS:
+                mask = values.str.contains(pattern)
+                count = int(mask.sum())
+                if count:
+                    issues.append(
+                        AuditIssue(
+                            check="sensitive",
+                            severity="warning",
+                            message=(
+                                f"{count} value(s) match {kind} pattern "
+                                f"(e.g., {values[mask].iloc[0]!r})."
+                            ),
+                            column=str(column),
+                            observed=count,
+                        )
+                    )
 
     def _check_category_share(
         self,

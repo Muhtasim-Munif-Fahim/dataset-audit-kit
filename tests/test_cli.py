@@ -99,6 +99,41 @@ class TestWhitespaceFlag:
         assert "[FAIL]" in capsys.readouterr().out
 
 
+class TestSensitiveFlag:
+    def test_emails_fail_only_when_enabled(self, tmp_path, capsys) -> None:
+        path = tmp_path / "contacts.csv"
+        pd.DataFrame({"contact": ["alice@example.com", "bo"]}).to_csv(path, index=False)
+        assert main(["audit", str(path), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "sensitive"]
+        assert main(["audit", str(path), "--json", "--check-sensitive"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        sensitive = [i for i in payload["issues"] if i["check"] == "sensitive"]
+        assert sensitive and sensitive[0]["message"].startswith("1 value(s) match email")
+
+    def test_check_gate_counts_sensitive_findings(self, tmp_path, capsys) -> None:
+        path = tmp_path / "contacts.csv"
+        pd.DataFrame({"contact": ["123-45-6789", "bo"]}).to_csv(path, index=False)
+        assert main(["check", str(path)]) == 0
+        assert main(["check", str(path), "--check-sensitive"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_sensitive_flag_is_part_of_the_report_fingerprint(
+        self, tmp_path, capsys
+    ) -> None:
+        path = tmp_path / "contacts.csv"
+        pd.DataFrame({"contact": ["alice@example.com"]}).to_csv(path, index=False)
+        first = tmp_path / "first.json"
+        second = tmp_path / "second.json"
+        assert main(["audit", str(path), "--save-json", str(first)]) == 0
+        assert main(
+            ["audit", str(path), "--check-sensitive", "--save-json", str(second)]
+        ) == 1
+        baseline = json.loads(first.read_text(encoding="utf-8"))
+        enabled = json.loads(second.read_text(encoding="utf-8"))
+        assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
+
+
 class TestCategoryShareCli:
     @pytest.fixture
     def dominant_csv(self, tmp_path):

@@ -90,6 +90,50 @@ class TestWhitespaceValueCheck:
         assert _messages(report, "whitespace") == []
 
 
+class TestSensitiveValueCheck:
+    def test_email_addresses_are_flagged_when_enabled(self) -> None:
+        data = pd.DataFrame({"contact": ["alice@example.com", "bob@corp.org", "nobody"]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        issue = next(i for i in report.issues if i.check == "sensitive")
+        assert issue.observed == 2
+        assert "match email pattern" in issue.message
+
+    def test_phone_numbers_are_flagged_when_enabled(self) -> None:
+        data = pd.DataFrame({"contact": ["123-456-7890", "(555) 123-4567", "plain"]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        messages = _messages(report, "sensitive")
+        assert any("match phone pattern" in message for message in messages)
+
+    def test_ssns_are_flagged_when_enabled(self) -> None:
+        data = pd.DataFrame({"contact": ["123-45-6789", "not-an-ssn"]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        issue = next(i for i in report.issues if i.check == "sensitive")
+        assert issue.observed == 1
+        assert "match ssn pattern" in issue.message
+
+    def test_clean_text_stays_silent(self) -> None:
+        data = pd.DataFrame({"name": ["ann", "bo cy"], "note": ["just prose", "n/a"]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        assert _messages(report, "sensitive") == []
+
+    def test_numeric_columns_are_ignored(self) -> None:
+        data = pd.DataFrame({"n": [1234567890, 5551234567]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        assert _messages(report, "sensitive") == []
+
+    def test_the_check_is_off_by_default(self) -> None:
+        data = pd.DataFrame({"contact": ["alice@example.com"]})
+        report = DatasetAuditor().audit_dataframe(data)
+        assert _messages(report, "sensitive") == []
+
+    def test_severity_is_warning_so_it_fails_a_check_gate(self) -> None:
+        data = pd.DataFrame({"contact": ["alice@example.com"]})
+        report = DatasetAuditor(sensitive_check=True).audit_dataframe(data)
+        issue = next(i for i in report.issues if i.check == "sensitive")
+        assert issue.severity == "warning"
+        assert report.status == "warn"
+
+
 class TestUniqueness:
     def test_counts_every_redundant_row(self) -> None:
         # One value repeated three times leaves two redundant rows, and a value

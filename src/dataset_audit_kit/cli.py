@@ -184,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fraction of null-pattern values allowed before warning (default: 0.05)",
     )
     audit.add_argument(
+        "--check-sensitive",
+        action="store_true",
+        help="Flag text values shaped like emails, phone numbers, or SSNs",
+    )
+    audit.add_argument(
         "--max-risk",
         type=_non_negative_float,
         default=None,
@@ -313,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Fraction of null-pattern values allowed before warning (default: 0.05)",
+    )
+    check.add_argument(
+        "--check-sensitive",
+        action="store_true",
+        help="Flag text values shaped like emails, phone numbers, or SSNs",
     )
     check.add_argument(
         "--progress",
@@ -692,6 +702,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         whitespace_check=args.check_whitespace,
         null_pattern_check=args.check_null_patterns,
         null_pattern_threshold=args.null_pattern_threshold,
+        sensitive_check=getattr(args, "check_sensitive", False),
         max_category_share=getattr(args, "max_category_share", None),
         rare_category_share=getattr(args, "rare_category_share", None),
     )
@@ -859,6 +870,7 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "missing_threshold": args.missing_threshold,
         "drift_threshold": args.drift_threshold,
         "whitespace_check": args.check_whitespace,
+        "sensitive_check": getattr(args, "check_sensitive", False),
         "sample_rows": args.sample_rows,
         "sample_seed": args.seed,
         "label_column": args.label_column,
@@ -972,6 +984,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         whitespace_check=args.check_whitespace,
         null_pattern_check=args.check_null_patterns,
         null_pattern_threshold=args.null_pattern_threshold,
+        sensitive_check=args.check_sensitive,
         max_category_share=getattr(args, "max_category_share", None),
         rare_category_share=getattr(args, "rare_category_share", None),
     )
