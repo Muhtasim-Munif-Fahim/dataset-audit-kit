@@ -193,6 +193,11 @@ class ColumnRule:
     date_format : str | None
         strptime format that every non-missing string value must parse as a
         datetime. Useful for guarding date columns stored as text.
+    date_formats : list[str] | None
+        strptime formats tried in order, for columns that legitimately mix
+        representations (for example ``%Y-%m-%d`` and ``%d/%m/%Y``). A value
+        passes as soon as any format parses it. When both this and
+        ``date_format`` are set, this list wins.
     min_length : int | None
         Minimum number of characters allowed for each non-missing value.
     max_length : int | None
@@ -235,6 +240,7 @@ class ColumnRule:
     min_unique: int | None = None
     max_unique: int | None = None
     date_format: str | None = None
+    date_formats: tuple[str, ...] | None = None
     min_length: int | None = None
     max_length: int | None = None
     min_date: str | None = None
@@ -424,6 +430,28 @@ class ValidationRules:
                 raise ValueError(
                     f"no_future_dates for column '{col_name}' must be a boolean"
                 )
+            raw_date_formats = col_config.get("date_formats")
+            if raw_date_formats is not None:
+                if (
+                    isinstance(raw_date_formats, (bool, str))
+                    or not isinstance(raw_date_formats, (list, tuple))
+                    or not raw_date_formats
+                    or not all(isinstance(fmt, str) for fmt in raw_date_formats)
+                ):
+                    raise ValueError(
+                        f"date_formats for column '{col_name}' must be a "
+                        "non-empty list of format strings"
+                    )
+                # The list supersedes the single-format key so an audit never
+                # has to reconcile two conflicting contracts.
+                parsed_date_formats = tuple(str(fmt) for fmt in raw_date_formats)
+                parsed_date_format = None
+            elif col_config.get("date_format") is not None:
+                parsed_date_format = str(col_config["date_format"])
+                parsed_date_formats = None
+            else:
+                parsed_date_format = None
+                parsed_date_formats = None
             column_rules[col_name] = ColumnRule(
                 name=col_name,
                 dtype=str(col_config.get("dtype") or "").lower() or None if col_config.get("dtype") else None,
@@ -438,11 +466,8 @@ class ValidationRules:
                 pattern=str(col_config["pattern"]) if col_config.get("pattern") is not None else None,
                 min_unique=integer_bounds["min_unique"],
                 max_unique=integer_bounds["max_unique"],
-                date_format=(
-                    str(col_config["date_format"])
-                    if col_config.get("date_format") is not None
-                    else None
-                ),
+                date_format=parsed_date_format,
+                date_formats=parsed_date_formats,
                 min_length=integer_bounds["min_length"],
                 max_length=integer_bounds["max_length"],
                 min_date=min_date,
@@ -595,6 +620,8 @@ class ValidationRules:
                     entry[attr] = value
             if rule.percentile_fences is not None:
                 entry["percentile_fences"] = list(rule.percentile_fences)
+            if rule.date_formats is not None:
+                entry["date_formats"] = list(rule.date_formats)
             if rule.ignore_case:
                 entry["ignore_case"] = True
             if rule.no_future_dates:
@@ -2639,6 +2666,37 @@ class DatasetAuditor:
 
         return {str(label): int(count) for label, count in counts.items()}
 
+    @staticmethod
+    def _effective_date_formats(rule: ColumnRule) -> tuple[str, ...]:
+        """Return the date formats a rule accepts, newest contract first.
+
+        ``date_formats`` supersedes the single ``date_format`` key when both
+        are present, mirroring how ``ValidationRules.from_dict`` resolves them.
+        """
+
+        if rule.date_formats is not None:
+            return rule.date_formats
+        if rule.date_format is not None:
+            return (rule.date_format,)
+        return ()
+
+    @staticmethod
+    def _validate_date_format(fmt: str) -> None:
+        """Raise ValueError unless ``fmt`` round-trips a reference datetime.
+
+        A format is usable when strftime can render a reference date and
+        strptime can parse the rendering back. Directives neither understands
+        (such as ``%Q``) raise, which is what guards the rules contract. The
+        round-trip avoids the old sample-value probe, which rejected perfectly
+        valid formats like ``%d/%m/%Y`` simply because they do not parse the
+        literal probe ``2000-01-01``.
+        """
+
+        from datetime import datetime
+
+        rendered = datetime(2000, 1, 1).strftime(fmt)
+        datetime.strptime(rendered, fmt)
+
     def _apply_rules(
         self,
         data: pd.DataFrame,
@@ -2929,31 +2987,46 @@ class DatasetAuditor:
                     )
 
             # --- datetime format contract ---
-            if rule.date_format is not None:
+            formats = self._effective_date_formats(rule)
+            if formats:
                 from datetime import datetime
 
-                try:
-                    datetime.strptime("2000-01-01", rule.date_format)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Invalid date_format for column '{column_name}': {exc}"
-                    ) from exc
+                for fmt in formats:
+                    try:
+                        self._validate_date_format(fmt)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Invalid date_format for column '{column_name}': {exc}"
+                        ) from exc
                 values = col_data.dropna().astype(str)
                 violations = 0
                 for value in values:
-                    try:
-                        datetime.strptime(value, rule.date_format)
-                    except (ValueError, TypeError):
+                    matched = False
+                    for fmt in formats:
+                        try:
+                            datetime.strptime(value, fmt)
+                        except (ValueError, TypeError):
+                            continue
+                        matched = True
+                        break
+                    if not matched:
                         violations += 1
                 if violations:
+                    if len(formats) == 1:
+                        message = (
+                            f"{violations} value(s) do not parse with date "
+                            f"format '{formats[0]}'."
+                        )
+                    else:
+                        message = (
+                            f"{violations} value(s) do not parse with any of the "
+                            f"configured date formats ({', '.join(formats)})."
+                        )
                     issues.append(
                         AuditIssue(
                             check="rule",
                             severity="warning",
-                            message=(
-                                f"{violations} value(s) do not parse with date "
-                                f"format '{rule.date_format}'."
-                            ),
+                            message=message,
                             column=column_name,
                             observed=violations,
                         )
@@ -2995,15 +3068,20 @@ class DatasetAuditor:
                 raw = col_data.dropna()
                 if raw.empty:
                     continue
-                if rule.date_format is not None:
+                formats = self._effective_date_formats(rule)
+                if formats:
                     parsed_values: list[pd.Timestamp | None] = []
                     for value in raw.astype(str):
-                        try:
-                            parsed_values.append(
-                                pd.Timestamp(datetime.strptime(value, rule.date_format))
-                            )
-                        except (ValueError, TypeError):
-                            parsed_values.append(None)
+                        parsed_value = None
+                        for fmt in formats:
+                            try:
+                                parsed_value = pd.Timestamp(
+                                    datetime.strptime(value, fmt)
+                                )
+                            except (ValueError, TypeError):
+                                continue
+                            break
+                        parsed_values.append(parsed_value)
                     parsed = pd.Series(parsed_values, index=raw.index)
                 else:
                     parsed = pd.to_datetime(raw, errors="coerce")

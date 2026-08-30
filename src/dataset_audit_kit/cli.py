@@ -1489,11 +1489,12 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
                 re.compile(rule.pattern)
             except re.error as exc:
                 findings.append(f"{column}: pattern does not compile: {exc}")
-        if rule.date_format is not None:
-            try:
-                datetime.strptime("2000-01-01", rule.date_format)
-            except ValueError as exc:
-                findings.append(f"{column}: invalid date_format ({exc})")
+        if rule.date_formats is not None or rule.date_format is not None:
+            for fmt in DatasetAuditor._effective_date_formats(rule):
+                try:
+                    DatasetAuditor._validate_date_format(fmt)
+                except ValueError as exc:
+                    findings.append(f"{column}: invalid date_format ({exc})")
 
     if findings:
         print(f"Invalid rules in '{args.rules_file}':", file=sys.stderr)
@@ -1600,6 +1601,9 @@ def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
             "dtype": "string",
             # strptime format that every non-missing value must parse as a datetime
             "date_format": "%Y-%m-%d",
+            # Several formats tried in order when a column mixes representations;
+            # supersedes date_format when both are present.
+            # "date_formats": ["%Y-%m-%d", "%d/%m/%Y"],
             # Earliest and latest allowed dates (parseable date strings)
             "min_date": "2020-01-01",
             "max_date": "2030-12-31",

@@ -683,6 +683,44 @@ class TestDateRangeRulesCli:
         assert "1 column rule(s)" in capsys.readouterr().out
 
 
+class TestMultipleDateFormatsCli:
+    def test_rules_file_with_multiple_formats_flags_bad_values(
+        self, tmp_path, capsys
+    ) -> None:
+        path = tmp_path / "events.csv"
+        pd.DataFrame({"when": ["2026-01-01", "31/12/2026", "not-a-date"]}).to_csv(
+            path, index=False
+        )
+        rules = tmp_path / "formats.json"
+        rules.write_text(
+            json.dumps({"when": {"date_formats": ["%Y-%m-%d", "%d/%m/%Y"]}}),
+            encoding="utf-8",
+        )
+        assert main(["check", str(path), "--rules", str(rules), "--minimal"]) == 1
+        out = capsys.readouterr()
+        assert "[FAIL]" in out.out
+
+    def test_validate_config_accepts_multiple_formats(self, tmp_path, capsys) -> None:
+        rules = tmp_path / "formats.json"
+        rules.write_text(
+            json.dumps({"when": {"date_formats": ["%Y-%m-%d", "%d/%m/%Y"]}}),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules)]) == 0
+        assert "1 column rule(s)" in capsys.readouterr().out
+
+    def test_validate_config_rejects_an_invalid_format_in_the_list(
+        self, tmp_path, capsys
+    ) -> None:
+        rules = tmp_path / "bad.json"
+        rules.write_text(
+            json.dumps({"when": {"date_formats": ["%Y-%m-%d", "%Q"]}}),
+            encoding="utf-8",
+        )
+        assert main(["validate-config", str(rules)]) == 1
+        assert "invalid date_format" in capsys.readouterr().err
+
+
 class TestValidateConfig:
 
     @pytest.fixture

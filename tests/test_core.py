@@ -792,6 +792,104 @@ class TestDateFormatRule:
         assert rules.columns["when"].date_format == "%Y-%m-%d"
 
 
+class TestMultipleDateFormats:
+    def test_accepts_either_configured_format(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_formats": ["%Y-%m-%d", "%d/%m/%Y"]}}
+        )
+        data = pd.DataFrame({"when": ["2026-01-01", "31/12/2026"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        assert _messages(report, "rule") == []
+
+    def test_reports_values_that_match_no_format(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_formats": ["%Y-%m-%d", "%d/%m/%Y"]}}
+        )
+        data = pd.DataFrame({"when": ["2026-01-01", "31/12/2026", "not-a-date"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        messages = _messages(report, "rule")
+        assert len(messages) == 1
+        assert "do not parse with any of the configured date formats" in messages[0]
+        assert "%Y-%m-%d" in messages[0] and "%d/%m/%Y" in messages[0]
+
+    def test_formats_are_tried_in_order(self) -> None:
+        # 01/02/2026 is January 2 under the first format (allowed) but
+        # February 1 under the second (past the bound), so the ordering
+        # decides whether the value passes.
+        rules = ValidationRules.from_dict(
+            {
+                "when": {
+                    "date_formats": ["%m/%d/%Y", "%d/%m/%Y"],
+                    "max_date": "2026-01-15",
+                }
+            }
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["01/02/2026"]})
+        )
+        assert _messages(report, "rule") == []
+
+    def test_invalid_format_in_the_list_raises(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_formats": ["%Y-%m-%d", "%Q"]}}
+        )
+        with pytest.raises(ValueError, match="date_format"):
+            DatasetAuditor(rules=rules).audit_dataframe(
+                pd.DataFrame({"when": ["2026-01-01"]})
+            )
+
+    def test_a_non_list_or_empty_list_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="date_formats"):
+            ValidationRules.from_dict({"when": {"date_formats": "%Y-%m-%d"}})
+        with pytest.raises(ValueError, match="date_formats"):
+            ValidationRules.from_dict({"when": {"date_formats": []}})
+        with pytest.raises(ValueError, match="date_formats"):
+            ValidationRules.from_dict({"when": {"date_formats": ["%Y-%m-%d", 5]}})
+
+    def test_date_formats_supersede_date_format(self) -> None:
+        rules = ValidationRules.from_dict(
+            {
+                "when": {
+                    "date_format": "%Y-%m-%d",
+                    "date_formats": ["%d/%m/%Y"],
+                }
+            }
+        )
+        data = pd.DataFrame({"when": ["31/12/2026"]})
+        report = DatasetAuditor(rules=rules).audit_dataframe(data)
+        assert _messages(report, "rule") == []
+
+    def test_round_trips_through_dict(self) -> None:
+        rules = ValidationRules.from_dict(
+            {"when": {"date_formats": ["%Y-%m-%d", "%d/%m/%Y"]}}
+        )
+        serialized = rules.to_dict()["when"]
+        assert serialized["date_formats"] == ["%Y-%m-%d", "%d/%m/%Y"]
+        assert "date_format" not in serialized
+        reloaded = ValidationRules.from_dict({"when": serialized})
+        assert reloaded.columns["when"].date_formats == ("%Y-%m-%d", "%d/%m/%Y")
+
+    def test_single_format_still_round_trips_as_date_format(self) -> None:
+        rules = ValidationRules.from_dict({"when": {"date_format": "%Y-%m-%d"}})
+        serialized = rules.to_dict()["when"]
+        assert serialized == {"date_format": "%Y-%m-%d"}
+
+    def test_date_range_bounds_honour_multiple_formats(self) -> None:
+        rules = ValidationRules.from_dict(
+            {
+                "when": {
+                    "date_formats": ["%Y-%m-%d", "%d/%m/%Y"],
+                    "min_date": "2020-01-01",
+                }
+            }
+        )
+        report = DatasetAuditor(rules=rules).audit_dataframe(
+            pd.DataFrame({"when": ["2019-06-01", "31/12/2020", "2021-01-01"]})
+        )
+        messages = _messages(report, "rule")
+        assert "1 value(s) before minimum date '2020-01-01'." in messages
+
+
 class TestStringLengthRules:
     def test_reports_values_outside_configured_length_range(self) -> None:
         rules = ValidationRules.from_dict(
