@@ -1002,6 +1002,20 @@ class AuditReport:
             )
         return output.getvalue()
 
+    def to_jsonl(self) -> str:
+        """Serialize each finding as one JSON object per line (NDJSON).
+
+        Unlike ``to_json``, which nests findings inside the full report, every
+        line here is a standalone finding in the same shape as the ``issues``
+        array of the JSON report, so a downstream job can stream the file line
+        by line instead of parsing a nested document. A clean audit emits an
+        empty file, which is the JSONL convention for zero records.
+        """
+
+        return "".join(
+            json.dumps(issue.__dict__) + "\n" for issue in self.issues
+        )
+
     def to_markdown(self) -> str:
         lines = [
             "# Dataset Audit Report",
@@ -1359,10 +1373,12 @@ class AuditReport:
             content = self.to_junit_xml()
         elif suffix == ".csv":
             content = self.to_csv()
+        elif suffix == ".jsonl":
+            content = self.to_jsonl()
         else:
             raise ValueError(
                 f"Unsupported report format '{suffix}'. "
-                "Supported formats are .json, .md, .html, .xml, .csv."
+                "Supported formats are .json, .md, .html, .xml, .csv, .jsonl."
             )
 
         # `--save-json reports/today.json` should not fail because `reports/`

@@ -661,6 +661,67 @@ class TestReportFiles:
         )
 
 
+class TestJsonlFindings:
+    def test_one_finding_per_line_with_the_json_report_shape(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.append(
+            AuditIssue(
+                check="missingness",
+                severity="warning",
+                message="50.0% missing.",
+                column="age",
+                observed=0.5,
+                threshold=0.05,
+            )
+        )
+        report.issues.append(
+            AuditIssue(check="schema_diff", severity="info", message="Column 'b' added.")
+        )
+        lines = report.to_jsonl().splitlines()
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        assert first == {
+            "check": "missingness",
+            "severity": "warning",
+            "message": "50.0% missing.",
+            "column": "age",
+            "observed": 0.5,
+            "threshold": 0.05,
+        }
+        second = json.loads(lines[1])
+        assert second["check"] == "schema_diff"
+        assert second["column"] is None
+
+    def test_clean_audit_emits_an_empty_file(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        assert report.to_jsonl() == ""
+
+    def test_to_file_supports_jsonl_findings(self, tmp_path) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.append(
+            AuditIssue(check="duplicates", severity="warning", message="1 duplicate.")
+        )
+        destination = tmp_path / "reports" / "findings.jsonl"
+        report.to_file(str(destination))
+        lines = destination.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["check"] == "duplicates"
+
+    def test_findings_match_the_json_report_issue_objects(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.append(
+            AuditIssue(
+                check="rule",
+                severity="error",
+                message="Expected dtype 'numeric'.",
+                column="score",
+            )
+        )
+        jsonl_finding = json.loads(report.to_jsonl().splitlines()[0])
+        json_finding = json.loads(report.to_json())["issues"][0]
+        assert jsonl_finding == json_finding
+
+
 class TestFileLoading:
     def test_audit_file_honours_encoding(self, tmp_path) -> None:
         path = tmp_path / "latin.csv"

@@ -72,6 +72,22 @@ class TestAuditOutput:
             "severity,check,column,message,observed,threshold"
         )
 
+    def test_jsonl_output_is_machine_readable(self, tmp_path, clean_csv) -> None:
+        destination = tmp_path / "reports" / "audit.jsonl"
+        assert main(["audit", clean_csv, "--jsonl-out", str(destination)]) == 0
+        lines = destination.read_text(encoding="utf-8").splitlines()
+        assert all(json.loads(line) for line in lines)
+
+    def test_jsonl_output_carries_the_findings(self, tmp_path, capsys) -> None:
+        path = tmp_path / "dirty.csv"
+        pd.DataFrame({"name": ["alice@example.com", "bo"]}).to_csv(path, index=False)
+        destination = tmp_path / "reports" / "audit.jsonl"
+        assert main(
+            ["audit", str(path), "--check-sensitive", "--jsonl-out", str(destination)]
+        ) == 1
+        findings = [json.loads(line) for line in destination.read_text().splitlines()]
+        assert [f for f in findings if f["check"] == "sensitive"]
+
     def test_unwritable_destination_reports_cleanly(self, tmp_path, clean_csv, capsys) -> None:
         blocker = tmp_path / "blocker"
         blocker.write_text("not a directory")

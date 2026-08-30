@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     audit.add_argument(
+        "--jsonl-out",
+        help="Write findings as newline-delimited JSON (one finding per line)",
+        default=None,
+    )
+    audit.add_argument(
         "--sample-rows",
         type=int,
         default=None,
@@ -395,6 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--csv-out",
         help="Write flat CSV findings for CI or spreadsheet consumers",
+        default=None,
+    )
+    check.add_argument(
+        "--jsonl-out",
+        help="Write findings as newline-delimited JSON (one finding per line)",
         default=None,
     )
     check.add_argument(
@@ -884,6 +894,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             "SARIF",
         ),
         (args.csv_out, report.to_csv(), "CSV"),
+        (args.jsonl_out, report.to_jsonl(), "JSONL"),
     ):
         if not path:
             continue
@@ -1082,6 +1093,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         (args.save_json, report.to_json()),
         (args.save_markdown, report.to_markdown()),
         (args.csv_out, report.to_csv()),
+        (args.jsonl_out, report.to_jsonl()),
     ):
         if not path:
             continue
