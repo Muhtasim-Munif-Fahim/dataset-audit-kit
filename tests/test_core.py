@@ -1715,3 +1715,105 @@ class TestRunMetadataStamping:
     def test_unstamped_html_has_no_provenance_line(self) -> None:
         plain = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
         assert "Audit ID" not in plain.to_html()
+
+
+class TestRuleCooccurrence:
+    def test_columns_with_a_single_check_are_excluded(self) -> None:
+        report = AuditReport(rows=4, columns=1, duplicate_rows=0, missing_cells=2)
+        report.issues.append(
+            AuditIssue(check="missingness", severity="warning", message="m", column="a")
+        )
+        assert report.rule_cooccurrence() == []
+
+    def test_pairs_are_reported_with_counts(self) -> None:
+        report = AuditReport(rows=4, columns=2, duplicate_rows=0, missing_cells=0)
+        report.issues.extend(
+            [
+                AuditIssue(check="missingness", severity="warning", message="m", column="a"),
+                AuditIssue(check="missingness", severity="warning", message="m", column="a"),
+                AuditIssue(check="rule", severity="warning", message="r", column="a"),
+                AuditIssue(check="duplicates", severity="warning", message="d", column="b"),
+                AuditIssue(check="rule", severity="warning", message="r", column="b"),
+            ]
+        )
+        cooccurrence = report.rule_cooccurrence()
+        assert len(cooccurrence) == 2
+        assert cooccurrence[0]["column"] == "a"
+        assert cooccurrence[0]["checks"] == ["missingness", "rule"]
+        assert cooccurrence[0]["findings"] == 3
+        assert cooccurrence[0]["pairs"] == [
+            {"checks": ["missingness", "rule"], "counts": {"missingness": 2, "rule": 1}}
+        ]
+        assert cooccurrence[1]["column"] == "b"
+        assert cooccurrence[1]["pairs"] == [
+            {"checks": ["duplicates", "rule"], "counts": {"duplicates": 1, "rule": 1}}
+        ]
+
+    def test_findings_without_a_column_are_ignored(self) -> None:
+        report = AuditReport(rows=4, columns=1, duplicate_rows=0, missing_cells=0)
+        report.issues.extend(
+            [
+                AuditIssue(check="missingness", severity="warning", message="m"),
+                AuditIssue(check="duplicates", severity="warning", message="d"),
+            ]
+        )
+        assert report.rule_cooccurrence() == []
+
+    def test_three_checks_produce_three_pairs(self) -> None:
+        report = AuditReport(rows=4, columns=1, duplicate_rows=0, missing_cells=0)
+        for check in ("missingness", "rule", "duplicates"):
+            report.issues.append(
+                AuditIssue(check=check, severity="warning", message="x", column="a")
+            )
+        cooccurrence = report.rule_cooccurrence()
+        assert [pair["checks"] for pair in cooccurrence[0]["pairs"]] == [
+            ["duplicates", "missingness"],
+            ["duplicates", "rule"],
+            ["missingness", "rule"],
+        ]
+
+    def test_output_is_stable_and_sorted_by_column(self) -> None:
+        report = AuditReport(rows=4, columns=2, duplicate_rows=0, missing_cells=0)
+        for column in ("b", "a"):
+            report.issues.append(
+                AuditIssue(check="missingness", severity="warning", message="m", column=column)
+            )
+            report.issues.append(
+                AuditIssue(check="rule", severity="warning", message="r", column=column)
+            )
+        assert [entry["column"] for entry in report.rule_cooccurrence()] == ["a", "b"]
+
+    def test_cooccurrence_appears_in_the_json_report(self) -> None:
+        report = AuditReport(rows=4, columns=1, duplicate_rows=0, missing_cells=2)
+        report.issues.extend(
+            [
+                AuditIssue(check="missingness", severity="warning", message="m", column="a"),
+                AuditIssue(check="rule", severity="warning", message="r", column="a"),
+            ]
+        )
+        payload = json.loads(report.to_json())
+        assert payload["rule_cooccurrence"] == [
+            {
+                "column": "a",
+                "checks": ["missingness", "rule"],
+                "findings": 2,
+                "pairs": [
+                    {"checks": ["missingness", "rule"], "counts": {"missingness": 1, "rule": 1}}
+                ],
+            }
+        ]
+
+    def test_markdown_and_html_render_the_section(self) -> None:
+        report = AuditReport(rows=4, columns=1, duplicate_rows=0, missing_cells=2)
+        report.issues.extend(
+            [
+                AuditIssue(check="missingness", severity="warning", message="m", column="a"),
+                AuditIssue(check="rule", severity="warning", message="r", column="a"),
+            ]
+        )
+        markdown = report.to_markdown()
+        assert "## Rule co-occurrence" in markdown
+        assert "`missingness`" in markdown and "`rule`" in markdown
+        html = report.to_html()
+        assert "Rule co-occurrence" in html
+        assert "missingness" in html

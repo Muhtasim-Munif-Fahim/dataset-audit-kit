@@ -893,6 +893,7 @@ class AuditReport:
             "drift_scores": self.drift_scores,
             "column_profiles": self.column_profiles,
             "issues": [issue.__dict__ for issue in self.issues],
+            "rule_cooccurrence": self.rule_cooccurrence(),
         }
         if any((self.audit_id, self.created_utc, self.config_hash)):
             payload["meta"] = {
@@ -1108,6 +1109,23 @@ class AuditReport:
         else:
             lines.extend(["", "_No issues found._"])
 
+        rule_cooccurrence = self.rule_cooccurrence()
+        if rule_cooccurrence:
+            lines.extend(["", "## Rule co-occurrence"])
+            lines.append(
+                "Columns flagged by more than one check, and the counts behind each pair:"
+            )
+            for entry in rule_cooccurrence:
+                checks = ", ".join(f"`{check}`" for check in entry["checks"])
+                lines.append(
+                    f"- **{entry['column']}**: {entry['findings']} finding(s) across {checks}"
+                )
+                for pair in entry["pairs"]:
+                    left, right = pair["checks"]
+                    lines.append(
+                        f"  - `{left}` ({pair['counts'][left]}) & `{right}` ({pair['counts'][right]})"
+                    )
+
         return "\n".join(lines)
 
     def to_html(self) -> str:
@@ -1270,6 +1288,29 @@ class AuditReport:
                 "</tbody></table>",
             ])
 
+        rule_cooccurrence = self.rule_cooccurrence()
+        if rule_cooccurrence:
+            cooccurrence_rows: list[str] = []
+            for entry in rule_cooccurrence:
+                for pair in entry["pairs"]:
+                    left, right = pair["checks"]
+                    cooccurrence_rows.append(
+                        "<tr>"
+                        f"<td>{esc(entry['column'])}</td>"
+                        f"<td>{esc(left)}</td>"
+                        f"<td>{pair['counts'][left]}</td>"
+                        f"<td>{esc(right)}</td>"
+                        f"<td>{pair['counts'][right]}</td>"
+                        "</tr>"
+                    )
+            sections.extend([
+                "<h2>Rule co-occurrence</h2>",
+                "<table><thead><tr><th>Column</th><th>Check</th>"
+                "<th>Findings</th><th>Check</th><th>Findings</th></tr></thead><tbody>",
+                *cooccurrence_rows,
+                "</tbody></table>",
+            ])
+
         sections.extend([
             "<h2>Issues</h2>",
             '<table><thead><tr><th>Severity</th><th>Check</th><th>Column</th><th>Message</th><th>Observed</th><th>Threshold</th></tr></thead><tbody>',
@@ -1367,6 +1408,53 @@ class AuditReport:
             suggestions.append(suggestion)
 
         return suggestions
+
+    def rule_cooccurrence(self) -> list[dict[str, object]]:
+        """Surface check pairs that fire together on the same column.
+
+        A column flagged by several checks at once often means the checks are
+        redundant or coupled: a ``rule`` bound that sits inside the missingness
+        threshold fires on the same rows, so the user is warned twice about one
+        underlying problem. Grouping findings by column and listing every check
+        pair makes that coupling visible so the contract can be simplified.
+
+        Only columns flagged by two or more distinct checks are included. The
+        output is fully sorted, so it is stable across runs.
+        """
+        from collections import Counter
+
+        by_column: dict[str, "Counter[str]"] = {}
+        for issue in self.issues:
+            if issue.column is None:
+                continue
+            if issue.column not in by_column:
+                by_column[issue.column] = Counter()
+            by_column[issue.column][issue.check] += 1
+
+        result: list[dict[str, object]] = []
+        for column in sorted(by_column):
+            counts = by_column[column]
+            if len(counts) < 2:
+                continue
+            checks = sorted(counts)
+            pairs: list[dict[str, object]] = []
+            for i, left in enumerate(checks):
+                for right in checks[i + 1 :]:
+                    pairs.append(
+                        {
+                            "checks": [left, right],
+                            "counts": {left: counts[left], right: counts[right]},
+                        }
+                    )
+            result.append(
+                {
+                    "column": column,
+                    "checks": checks,
+                    "findings": int(sum(counts.values())),
+                    "pairs": pairs,
+                }
+            )
+        return result
 
     def to_file(self, path: str) -> str:
         """Write the report to a file, auto-detecting format from extension.
