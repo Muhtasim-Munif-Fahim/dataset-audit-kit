@@ -1509,6 +1509,119 @@ class AuditReport:
         rows.sort(key=lambda row: (-float(row["outlier_ratio"]), -int(row["outliers_iqr"]), row["column"]))
         return rows[:top]
 
+    def profile_diff(
+        self,
+        other: "AuditReport",
+        *,
+        columns: list[str] | None = None,
+        include_categorical: bool = True,
+    ) -> list[dict[str, object]]:
+        """Compare two reports' column profiles side by side.
+
+        Reports are compared at the profile level rather than as issue lists:
+        the consumer gets one row per shared column with the captured summary
+        statistics from both sides (counts, missing rates, numeric means/std
+        and quantiles, categorical top-key frequencies, and IQR outlier
+        ratios). Columns are sorted alphabetically for stability, and only
+        columns present in both reports are included. ``columns`` restricts
+        the comparison to a chosen subset of those shared columns; raising
+        ``ValueError`` for an unknown name so callers fail fast. The
+        ``include_categorical`` flag keeps the table numeric-only when set to
+        ``False`` so consumers can avoid mixing scales.
+
+        Unlike :class:`DatasetBaseline.compare`, this method does not raise
+        an issue list: the goal is a stable table that downstream code can
+        render as-is.
+    """
+        if other is None:
+            raise ValueError("other report must not be None")
+        if not isinstance(columns, list) and columns is not None:
+            raise ValueError("columns must be a list of column names")
+
+        before = self.column_profiles
+        after = other.column_profiles
+        shared = sorted(set(before).intersection(after))
+        if columns is not None:
+            requested = [str(name) for name in columns]
+            missing = [name for name in requested if name not in shared]
+            if missing:
+                raise ValueError(
+                    "unknown columns not present in both reports: " + ", ".join(missing)
+                )
+            selected = requested
+        else:
+            selected = shared
+
+        rows: list[dict[str, object]] = []
+        for column in selected:
+            left = before[column]
+            right = after[column]
+            left_dtype = str(left.get("dtype", "other"))
+            right_dtype = str(right.get("dtype", "other"))
+            if not include_categorical and (left_dtype != "numeric" or right_dtype != "numeric"):
+                continue
+
+            def _num(value: object) -> float | None:
+                if isinstance(value, bool):
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                return None
+
+            def _missing_rate(profile: dict[str, object]) -> float | None:
+                count = profile.get("count")
+                missing = profile.get("missing")
+                num_count = _num(count)
+                num_missing = _num(missing)
+                if num_count is None or num_missing is None or num_count <= 0:
+                    return None
+                return float(num_missing) / float(num_count)
+
+            row: dict[str, object] = {
+                "column": column,
+                "dtype_before": left_dtype,
+                "dtype_after": right_dtype,
+                "count_before": left.get("count"),
+                "count_after": right.get("count"),
+                "missing_rate_before": _missing_rate(left),
+                "missing_rate_after": _missing_rate(right),
+            }
+
+            for stat in ("mean", "std", "min", "max", "median", "q25", "q75"):
+                before_val = _num(left.get(stat))
+                after_val = _num(right.get(stat))
+                row[f"{stat}_before"] = before_val
+                row[f"{stat}_after"] = after_val
+                if before_val is not None and after_val is not None:
+                    row[f"{stat}_delta"] = round(after_val - before_val, 6)
+                else:
+                    row[f"{stat}_delta"] = None
+
+            for stat in ("unique",):
+                before_val = left.get(stat)
+                after_val = right.get(stat)
+                if isinstance(before_val, (int, float)) and not isinstance(before_val, bool) \
+                    and isinstance(after_val, (int, float)) and not isinstance(after_val, bool):
+                    row[f"{stat}_delta"] = int(after_val) - int(before_val)
+                else:
+                    row[f"{stat}_delta"] = None
+
+            before_ratio = _num(left.get("outlier_ratio"))
+            after_ratio = _num(right.get("outlier_ratio"))
+            row["outlier_ratio_before"] = before_ratio
+            row["outlier_ratio_after"] = after_ratio
+            if before_ratio is not None and after_ratio is not None:
+                row["outlier_ratio_delta"] = round(after_ratio - before_ratio, 6)
+            else:
+                row["outlier_ratio_delta"] = None
+
+            if left_dtype == "categorical" and right_dtype == "categorical":
+                row["top_before"] = left.get("top")
+                row["top_after"] = right.get("top")
+
+            rows.append(row)
+        return rows
+
     def to_file(self, path: str) -> str:
         """Write the report to a file, auto-detecting format from extension.
 

@@ -1912,3 +1912,114 @@ class TestOutlierSummary:
                 "std": None,
             }
         ]
+
+
+class TestProfileDiff:
+    def _numeric_profile(self, mean: float, std: float, *, count: int = 100, missing: int = 0,
+                          outlier_ratio: float = 0.05, q25: float = 1.0, q75: float = 2.0,
+                          unique: int | None = None) -> dict[str, object]:
+        profile: dict[str, object] = {
+            "dtype": "numeric",
+            "count": count,
+            "missing": missing,
+            "mean": mean,
+            "std": std,
+            "min": mean - 3 * std,
+            "max": mean + 3 * std,
+            "median": mean,
+            "q25": q25,
+            "q75": q75,
+            "outliers_iqr": int(round(outlier_ratio * count)),
+            "outlier_ratio": outlier_ratio,
+        }
+        if unique is not None:
+            profile["unique"] = unique
+        return profile
+
+    def test_shared_columns_get_side_by_side_rows(self) -> None:
+        before = AuditReport(rows=100, columns=2, duplicate_rows=0, missing_cells=4)
+        after = AuditReport(rows=110, columns=2, duplicate_rows=0, missing_cells=10)
+        before.column_profiles = {"x": self._numeric_profile(1.0, 0.5), "y": self._numeric_profile(2.0, 0.3)}
+        after.column_profiles = {"x": self._numeric_profile(1.5, 0.6), "only_after": self._numeric_profile(0.0, 0.1)}
+
+        rows = before.profile_diff(after)
+        assert [row["column"] for row in rows] == ["x"]
+        row = rows[0]
+        assert row["dtype_before"] == "numeric"
+        assert row["mean_before"] == 1.0
+        assert row["mean_after"] == 1.5
+        assert row["mean_delta"] == 0.5
+        assert row["std_delta"] == pytest.approx(0.1)
+        assert row["outlier_ratio_delta"] == 0.0
+        assert row["missing_rate_before"] == 0.0
+        assert row["missing_rate_after"] == 0.0
+
+    def test_columns_argument_restricts_the_comparison(self) -> None:
+        before = AuditReport(rows=10, columns=2, duplicate_rows=0, missing_cells=0)
+        after = AuditReport(rows=10, columns=2, duplicate_rows=0, missing_cells=0)
+        before.column_profiles = {"a": self._numeric_profile(0.0, 1.0), "b": self._numeric_profile(0.0, 1.0)}
+        after.column_profiles = {"a": self._numeric_profile(0.0, 1.0), "b": self._numeric_profile(0.0, 1.0)}
+
+        rows = before.profile_diff(after, columns=["a"])
+        assert [row["column"] for row in rows] == ["a"]
+        rows = before.profile_diff(after, columns=["a", "b"])
+        assert [row["column"] for row in rows] == ["a", "b"]
+
+    def test_unknown_columns_raise(self) -> None:
+        before = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        after = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        before.column_profiles = {"a": self._numeric_profile(0.0, 1.0)}
+        after.column_profiles = {"a": self._numeric_profile(0.0, 1.0)}
+
+        with pytest.raises(ValueError, match="unknown columns"):
+            before.profile_diff(after, columns=["a", "ghost"])
+
+    def test_non_numeric_columns_are_omitted_when_requested(self) -> None:
+        before = AuditReport(rows=20, columns=2, duplicate_rows=0, missing_cells=0)
+        after = AuditReport(rows=20, columns=2, duplicate_rows=0, missing_cells=0)
+        before.column_profiles = {
+            "cat_col": {"dtype": "categorical", "count": 20, "missing": 0, "unique": 4, "top": "A", "freq": 6},
+            "num": self._numeric_profile(0.0, 1.0),
+        }
+        after.column_profiles = {
+            "cat_col": {"dtype": "categorical", "count": 20, "missing": 0, "unique": 5, "top": "B", "freq": 7},
+            "num": self._numeric_profile(0.5, 1.1),
+        }
+
+        rows = before.profile_diff(after, include_categorical=False)
+        assert [row["column"] for row in rows] == ["num"]
+
+        rows = before.profile_diff(after, include_categorical=True)
+        assert [row["column"] for row in rows] == ["cat_col", "num"]
+        assert rows[0]["top_before"] == "A"
+        assert rows[0]["top_after"] == "B"
+
+    def test_dtype_change_is_recorded(self) -> None:
+        before = AuditReport(rows=10, columns=1, duplicate_rows=0, missing_cells=0)
+        after = AuditReport(rows=10, columns=1, duplicate_rows=0, missing_cells=0)
+        before.column_profiles = {"x": self._numeric_profile(1.0, 0.5)}
+        after.column_profiles = {"x": {"dtype": "categorical", "count": 10, "missing": 0, "unique": 4, "top": "A", "freq": 5}}
+
+        rows = before.profile_diff(after)
+        assert rows[0]["dtype_before"] == "numeric"
+        assert rows[0]["dtype_after"] == "categorical"
+        assert rows[0]["mean_before"] == 1.0
+        assert rows[0]["mean_after"] is None
+        assert rows[0]["mean_delta"] is None
+
+    def test_missing_rates_carry_through(self) -> None:
+        before = AuditReport(rows=100, columns=1, duplicate_rows=0, missing_cells=10)
+        after = AuditReport(rows=200, columns=1, duplicate_rows=0, missing_cells=80)
+        before.column_profiles = {"x": self._numeric_profile(0.0, 1.0, count=100, missing=10)}
+        after.column_profiles = {"x": self._numeric_profile(0.0, 1.0, count=200, missing=80)}
+
+        rows = before.profile_diff(after)
+        assert rows[0]["missing_rate_before"] == pytest.approx(0.10)
+        assert rows[0]["missing_rate_after"] == pytest.approx(0.40)
+
+    def test_invalid_other_and_columns_arguments(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        with pytest.raises(ValueError, match="other report must not be None"):
+            report.profile_diff(None)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="columns must be a list"):
+            report.profile_diff(report, columns="not a list")  # type: ignore[arg-type]
