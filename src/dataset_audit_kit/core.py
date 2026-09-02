@@ -894,6 +894,7 @@ class AuditReport:
             "column_profiles": self.column_profiles,
             "issues": [issue.__dict__ for issue in self.issues],
             "rule_cooccurrence": self.rule_cooccurrence(),
+            "outlier_summary": self.outlier_summary(),
         }
         if any((self.audit_id, self.created_utc, self.config_hash)):
             payload["meta"] = {
@@ -1455,6 +1456,58 @@ class AuditReport:
                 }
             )
         return result
+
+    def outlier_summary(
+        self,
+        *,
+        top: int = 5,
+        threshold: float = 0.05,
+    ) -> list[dict[str, object]]:
+        """Rank numeric columns by their IQR-based outlier ratio.
+
+        Surfaces the columns most contaminated by IQR-flagged outliers so the
+        audit consumer can see which fields would benefit from outlier
+        treatment before modeling. Columns with no IQR outlier ratio in their
+        profile (non-numeric or absent) are skipped, as are columns whose
+        outlier ratio falls below ``threshold``. Returned rows are sorted by
+        ``outlier_ratio`` descending then by ``outliers_iqr`` descending so
+        ties are stable. ``top`` is clamped to a positive integer; ``top=0``
+        raises ``ValueError``.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(threshold, (int, float))
+            or isinstance(threshold, bool)
+            or not 0.0 <= float(threshold) <= 1.0
+        ):
+            raise ValueError("threshold must be a number between 0 and 1")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            ratio = profile.get("outlier_ratio")
+            count = profile.get("outliers_iqr")
+            if ratio is None or count is None:
+                continue
+            if profile.get("dtype") != "numeric":
+                continue
+            ratio_f = float(ratio)
+            if ratio_f < float(threshold):
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "outliers_iqr": int(count),
+                    "outlier_ratio": ratio_f,
+                    "non_null": int(profile.get("count", 0)) - int(profile.get("missing", 0)),
+                    "q1": profile.get("q25"),
+                    "q3": profile.get("q75"),
+                    "mean": profile.get("mean"),
+                    "std": profile.get("std"),
+                }
+            )
+        rows.sort(key=lambda row: (-float(row["outlier_ratio"]), -int(row["outliers_iqr"]), row["column"]))
+        return rows[:top]
 
     def to_file(self, path: str) -> str:
         """Write the report to a file, auto-detecting format from extension.

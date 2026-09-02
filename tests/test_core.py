@@ -1817,3 +1817,98 @@ class TestRuleCooccurrence:
         html = report.to_html()
         assert "Rule co-occurrence" in html
         assert "missingness" in html
+
+
+class TestOutlierSummary:
+    def _make_report(self, profiles: dict[str, dict[str, object]]) -> AuditReport:
+        report = AuditReport(rows=10, columns=len(profiles), duplicate_rows=0, missing_cells=0)
+        report.column_profiles = dict(profiles)
+        return report
+
+    def test_returns_columns_above_threshold_sorted_descending(self) -> None:
+        report = self._make_report(
+            {
+                "low": {"dtype": "numeric", "outliers_iqr": 1, "outlier_ratio": 0.02, "count": 100, "missing": 0, "q25": 1.0, "q75": 2.0, "mean": 1.5, "std": 0.3},
+                "heavy": {"dtype": "numeric", "outliers_iqr": 20, "outlier_ratio": 0.40, "count": 60, "missing": 0, "q25": 0.0, "q75": 5.0, "mean": 3.0, "std": 4.2},
+                "mild": {"dtype": "numeric", "outliers_iqr": 4, "outlier_ratio": 0.10, "count": 50, "missing": 0, "q25": 2.0, "q75": 3.0, "mean": 2.5, "std": 0.5},
+            }
+        )
+        rows = report.outlier_summary()
+        assert [row["column"] for row in rows] == ["heavy", "mild"]
+        assert rows[0]["outliers_iqr"] == 20
+        assert rows[0]["outlier_ratio"] == 0.40
+        assert rows[0]["non_null"] == 60
+
+    def test_top_argument_limits_the_returned_rows(self) -> None:
+        report = self._make_report(
+            {
+                "a": {"dtype": "numeric", "outliers_iqr": 5, "outlier_ratio": 0.20},
+                "b": {"dtype": "numeric", "outliers_iqr": 10, "outlier_ratio": 0.30},
+                "c": {"dtype": "numeric", "outliers_iqr": 15, "outlier_ratio": 0.50},
+            }
+        )
+        rows = report.outlier_summary(top=2)
+        assert [row["column"] for row in rows] == ["c", "b"]
+
+    def test_non_numeric_columns_are_skipped(self) -> None:
+        report = self._make_report(
+            {
+                "cat": {"dtype": "categorical", "outliers_iqr": 99, "outlier_ratio": 0.99, "count": 100, "missing": 0},
+                "num": {"dtype": "numeric", "outliers_iqr": 5, "outlier_ratio": 0.25, "count": 20, "missing": 0},
+            }
+        )
+        rows = report.outlier_summary()
+        assert [row["column"] for row in rows] == ["num"]
+
+    def test_threshold_filters_out_quiet_columns(self) -> None:
+        report = self._make_report(
+            {
+                "quiet": {"dtype": "numeric", "outliers_iqr": 1, "outlier_ratio": 0.04, "count": 50, "missing": 0},
+                "noisy": {"dtype": "numeric", "outliers_iqr": 12, "outlier_ratio": 0.30, "count": 40, "missing": 0},
+            }
+        )
+        rows = report.outlier_summary(threshold=0.10)
+        assert [row["column"] for row in rows] == ["noisy"]
+
+    def test_ties_break_by_outlier_count_then_column_name(self) -> None:
+        report = self._make_report(
+            {
+                "zeta": {"dtype": "numeric", "outliers_iqr": 5, "outlier_ratio": 0.20, "count": 50, "missing": 0},
+                "alpha": {"dtype": "numeric", "outliers_iqr": 7, "outlier_ratio": 0.20, "count": 60, "missing": 0},
+                "beta": {"dtype": "numeric", "outliers_iqr": 5, "outlier_ratio": 0.20, "count": 60, "missing": 0},
+            }
+        )
+        rows = report.outlier_summary()
+        assert [row["column"] for row in rows] == ["alpha", "beta", "zeta"]
+
+    def test_invalid_arguments_are_rejected(self) -> None:
+        report = AuditReport(rows=1, columns=1, duplicate_rows=0, missing_cells=0)
+        with pytest.raises(ValueError, match="top must be a positive integer"):
+            report.outlier_summary(top=0)
+        with pytest.raises(ValueError, match="top must be a positive integer"):
+            report.outlier_summary(top=1.5)
+        with pytest.raises(ValueError, match="threshold must be a number between 0 and 1"):
+            report.outlier_summary(threshold=1.5)
+        with pytest.raises(ValueError, match="threshold must be a number between 0 and 1"):
+            report.outlier_summary(threshold=-0.1)
+
+    def test_summary_appears_in_the_serialized_report(self) -> None:
+        report = self._make_report(
+            {
+                "noise": {"dtype": "numeric", "outliers_iqr": 8, "outlier_ratio": 0.25, "count": 32, "missing": 0},
+                "clean": {"dtype": "numeric", "outliers_iqr": 0, "outlier_ratio": 0.0, "count": 30, "missing": 0},
+            }
+        )
+        payload = json.loads(report.to_json())
+        assert payload["outlier_summary"] == [
+            {
+                "column": "noise",
+                "outliers_iqr": 8,
+                "outlier_ratio": 0.25,
+                "non_null": 32,
+                "q1": None,
+                "q3": None,
+                "mean": None,
+                "std": None,
+            }
+        ]
