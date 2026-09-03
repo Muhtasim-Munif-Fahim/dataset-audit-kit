@@ -1669,6 +1669,73 @@ class AuditReport:
         path_obj.write_text(content, encoding="utf-8")
         return path
 
+    def profile_to_dict_compact(self) -> dict[str, object]:
+        """Return a view-friendly dict of the report's headline numbers.
+
+        Intended for API/UI consumers that do not need the full per-column
+        profile payload. The shape is::
+
+            {
+              "audit_id": str | None,
+              "created_utc": str | None,
+              "rows": int,
+              "columns": int,
+              "duplicate_rows": int,
+              "missing_cells": int,
+              "risk_score": float,
+              "status": str,
+              "column_types": {"numeric": [...], "categorical": [...], "other": [...]},
+              "high_missingness_columns": [{"column": str, "rate": float}, ...],
+              "high_outlier_columns": [{"column": str, "ratio": float}, ...],
+              "blocking_issue_count": int,
+              "checks_seen": [str, ...],
+            }
+
+        The two ``*_columns`` lists are sorted descending by their rate /
+        ratio and clipped at 10 rows so the response stays compact.
+        """
+        column_types: dict[str, list[str]] = {"numeric": [], "categorical": [], "other": []}
+        high_missing: list[dict[str, float]] = []
+        high_outliers: list[dict[str, float]] = []
+        for name, profile in self.column_profiles.items():
+            dtype = str(profile.get("dtype", "other"))
+            if dtype in column_types:
+                bucket = column_types[dtype]
+            else:
+                bucket = column_types["other"]
+            bucket.append(name)
+            missing_rate = float(profile.get("missing", 0) or 0)
+            count = float(profile.get("count", 0) or 0)
+            if count > 0:
+                rate = missing_rate / count
+            else:
+                rate = 0.0
+            if rate > 0.05:
+                high_missing.append({"column": name, "rate": round(rate, 4)})
+            outlier_ratio = profile.get("outlier_ratio")
+            if isinstance(outlier_ratio, (int, float)) and outlier_ratio > 0.05:
+                high_outliers.append({
+                    "column": name,
+                    "ratio": round(float(outlier_ratio), 4),
+                })
+        high_missing.sort(key=lambda row: row["rate"], reverse=True)
+        high_outliers.sort(key=lambda row: row["ratio"], reverse=True)
+        return {
+            "audit_id": self.audit_id,
+            "created_utc": self.created_utc,
+            "rows": self.rows,
+            "columns": self.columns,
+            "duplicate_rows": self.duplicate_rows,
+            "missing_cells": self.missing_cells,
+            "risk_score": round(float(self.risk_score), 4),
+            "status": self.status,
+            "column_types": {k: sorted(v) for k, v in column_types.items()},
+            "high_missingness_columns": high_missing[:10],
+            "high_outlier_columns": high_outliers[:10],
+            "blocking_issue_count": len(self.blocking_issues),
+            "checks_seen": sorted({issue.check for issue in self.issues}),
+        }
+
     def batch_summary_csv(
         self,
         path: str,
