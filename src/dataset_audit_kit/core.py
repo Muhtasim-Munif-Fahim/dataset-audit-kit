@@ -1669,6 +1669,65 @@ class AuditReport:
         path_obj.write_text(content, encoding="utf-8")
         return path
 
+    def to_html_table(self) -> str:
+        """Render a single-file HTML page with the report's headline numbers.
+
+        The page is intentionally minimal (no external CSS/JS) so the
+        output renders in a notebook, on GitHub, or in a static-file
+        preview. It is the same compact view as
+        :meth:`profile_to_dict_compact` rendered as an HTML table.
+        """
+        payload = self.profile_to_dict_compact()
+        column_types = payload["column_types"]
+
+        def _rows(items: list[str]) -> str:
+            return "".join(
+                f"<tr><td>{html.escape(name)}</td></tr>" for name in items
+            )
+
+        def _list_rows(items: list[dict[str, object]], value_key: str) -> str:
+            return "".join(
+                f"<tr><td>{html.escape(str(item['column']))}</td>"
+                f"<td>{html.escape(str(item[value_key]))}</td></tr>"
+                for item in items
+            )
+
+        return (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>dataset-audit-kit report - {html.escape(str(payload['audit_id']) or 'report')}</title>"
+            "<style>body{font-family:sans-serif;margin:2em auto;max-width:60em}"
+            "table{border-collapse:collapse;margin:1em 0}th,td{border:1px solid #ccc;padding:0.3em 0.6em}"
+            "th{background:#f4f4f4}</style></head><body>"
+            f"<h1>dataset-audit-kit report</h1>"
+            f"<p><strong>audit_id:</strong> {html.escape(str(payload['audit_id']) or '-')}<br>"
+            f"<strong>created_utc:</strong> {html.escape(str(payload['created_utc']) or '-')}<br>"
+            f"<strong>status:</strong> {html.escape(str(payload['status']))}<br>"
+            f"<strong>rows:</strong> {int(payload['rows'])} "
+            f"<strong>columns:</strong> {int(payload['columns'])} "
+            f"<strong>missing_cells:</strong> {int(payload['missing_cells'])} "
+            f"<strong>duplicate_rows:</strong> {int(payload['duplicate_rows'])}<br>"
+            f"<strong>blocking_issues:</strong> {int(payload['blocking_issue_count'])} "
+            f"<strong>risk_score:</strong> {float(payload['risk_score']):.4f}</p>"
+            "<h2>Column types</h2><table><thead><tr><th>Numeric</th></tr></thead>"
+            f"<tbody>{_rows(column_types['numeric'])}</tbody></table>"
+            "<table><thead><tr><th>Categorical</th></tr></thead>"
+            f"<tbody>{_rows(column_types['categorical'])}</tbody></table>"
+            "<table><thead><tr><th>Other</th></tr></thead>"
+            f"<tbody>{_rows(column_types['other'])}</tbody></table>"
+            "<h2>High-missingness columns (rate &gt; 5%)</h2>"
+            "<table><thead><tr><th>Column</th><th>Missing rate</th></tr></thead>"
+            f"<tbody>{_list_rows(payload['high_missingness_columns'], 'rate')}</tbody></table>"
+            "<h2>High-outlier columns (ratio &gt; 5%)</h2>"
+            "<table><thead><tr><th>Column</th><th>Outlier ratio</th></tr></thead>"
+            f"<tbody>{_list_rows(payload['high_outlier_columns'], 'ratio')}</tbody></table>"
+            "<h2>Checks seen</h2><ul>"
+            + "".join(
+                f"<li>{html.escape(check)}</li>"
+                for check in payload["checks_seen"]
+            )
+            + "</ul></body></html>"
+        )
+
     def profile_to_dict_compact(self) -> dict[str, object]:
         """Return a view-friendly dict of the report's headline numbers.
 
