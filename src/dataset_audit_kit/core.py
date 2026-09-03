@@ -1669,9 +1669,84 @@ class AuditReport:
         path_obj.write_text(content, encoding="utf-8")
         return path
 
+    def column_overlap_table(
+        self,
+        other: "AuditReport",
+        *,
+        columns: list[str] | None = None,
+        levels_left: dict[str, list[str]] | None = None,
+        levels_right: dict[str, list[str]] | None = None,
+    ) -> list[dict[str, object]]:
+        """Quantify how categorical levels overlap with another report.
 
+        When ``levels_left`` / ``levels_right`` are provided, they are used
+        to compute Jaccard and overlap counts per column. Otherwise the
+        report falls back to the ``top_5`` field captured in the report's
+        column_profiles, which is enough to flag large mismatches between
+        the most-frequent categories of two related datasets. Only columns
+        present in both reports are considered; ``columns`` restricts the
+        comparison to a chosen subset. ``columns`` referencing a name that
+        is not in both reports raises ``ValueError`` so callers fail fast.
 
+        Returned rows are sorted alphabetically by column name and carry
+        ``column``, ``dtype_left``, ``dtype_right``, ``levels_left``,
+        ``levels_right``, ``intersection``, ``union_size``, ``jaccard``,
+        ``only_left``, and ``only_right``. ``only_left`` and ``only_right``
+        are empty strings when no caller-supplied level sets were given.
+        """
 
+        def _coerce_levels(values: object) -> set[str]:
+            if values is None:
+                return set()
+            if isinstance(values, (list, tuple, set)):
+                return {str(item) for item in values}
+            if isinstance(values, dict):
+                return {str(k) for k in values.keys()}
+            return {str(values)}
+
+        left = self.column_profiles
+        right = other.column_profiles
+        shared = sorted(set(left).intersection(right))
+        if columns is not None:
+            requested = [str(name) for name in columns]
+            missing = [name for name in requested if name not in shared]
+            if missing:
+                raise ValueError(
+                    "unknown columns not present in both reports: " + ", ".join(missing)
+                )
+            selected = requested
+        else:
+            selected = shared
+
+        rows: list[dict[str, object]] = []
+        for column in selected:
+            left_levels = (
+                _coerce_levels(levels_left.get(column)) if levels_left else set()
+            )
+            right_levels = (
+                _coerce_levels(levels_right.get(column)) if levels_right else set()
+            )
+            if not left_levels:
+                left_levels = set(str(k) for k in (left[column].get("top_5") or {}).keys())
+            if not right_levels:
+                right_levels = set(str(k) for k in (right[column].get("top_5") or {}).keys())
+
+            intersection = sorted(left_levels & right_levels)
+            union = left_levels | right_levels
+            jaccard = (len(intersection) / len(union)) if union else 1.0
+            rows.append({
+                "column": column,
+                "dtype_left": str(left[column].get("dtype", "other")),
+                "dtype_right": str(right[column].get("dtype", "other")),
+                "levels_left": sorted(left_levels),
+                "levels_right": sorted(right_levels),
+                "intersection": intersection,
+                "union_size": len(union),
+                "jaccard": round(float(jaccard), 4),
+                "only_left": sorted(left_levels - right_levels),
+                "only_right": sorted(right_levels - left_levels),
+            })
+        return rows
 
     @classmethod
     def diff(cls, before: 'AuditReport', after: 'AuditReport') -> 'AuditReport':
