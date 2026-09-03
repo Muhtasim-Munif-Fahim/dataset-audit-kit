@@ -1669,6 +1669,55 @@ class AuditReport:
         path_obj.write_text(content, encoding="utf-8")
         return path
 
+    def batch_summary_csv(
+        self,
+        path: str,
+        reports: list["AuditReport"] | None = None,
+    ) -> str:
+        """Write a per-report summary CSV (one row per report) to ``path``.
+
+        ``reports`` defaults to ``[self]`` so the call doubles as a
+        single-report summary writer. Each row carries the report's
+        ``audit_id`` (when stamped), ``created_utc`` (when stamped), row
+        and column counts, duplicate rows, missing cells, label
+        distribution length, drift-score count, blocking-issue count, the
+        list of failing checks, and the risk score. ``path`` is created
+        with parents as needed. The CSV header is always written even when
+        the input is empty so downstream parsers do not have to special-
+        case zero reports.
+        """
+        target = Path(path)
+        if target.parent != Path(""):
+            target.parent.mkdir(parents=True, exist_ok=True)
+        rows = reports if reports is not None else [self]
+        fieldnames = [
+            "audit_id", "created_utc", "rows", "columns", "duplicate_rows",
+            "missing_cells", "label_distribution_size", "drift_scores",
+            "blocking_issues", "failing_checks", "risk_score",
+        ]
+        with open(target, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for report in rows:
+                failing = sorted({
+                    f"{issue.check}:{issue.column or ''}"
+                    for issue in report.blocking_issues
+                })
+                writer.writerow({
+                    "audit_id": report.audit_id or "",
+                    "created_utc": report.created_utc or "",
+                    "rows": report.rows,
+                    "columns": report.columns,
+                    "duplicate_rows": report.duplicate_rows,
+                    "missing_cells": report.missing_cells,
+                    "label_distribution_size": len(report.label_distribution),
+                    "drift_scores": len(report.drift_scores),
+                    "blocking_issues": len(report.blocking_issues),
+                    "failing_checks": "|".join(failing),
+                    "risk_score": round(float(report.risk_score), 4),
+                })
+        return str(target)
+
     def column_overlap_table(
         self,
         other: "AuditReport",
