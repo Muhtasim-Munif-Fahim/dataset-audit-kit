@@ -473,6 +473,17 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("current", help="Path to the later report")
     diff_parser.add_argument("--fail-on-regression", action="store_true", help="Exit 1 if quality dropped or issues were added")
 
+    profile_diff_parser = subparsers.add_parser(
+        "profile-diff",
+        help="Side-by-side per-column profile comparison from two saved JSON reports",
+    )
+    profile_diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
+    profile_diff_parser.add_argument("current", help="Path to the later report")
+    profile_diff_parser.add_argument("--columns", default=None, help="Comma-separated column names to restrict the comparison")
+    profile_diff_parser.add_argument("--numeric-only", action="store_true", help="Skip categorical columns")
+    profile_diff_parser.add_argument("--json", action="store_true", help="Emit one JSON row per column instead of a table")
+    profile_diff_parser.add_argument("--csv", action="store_true", help="Emit CSV instead of a table")
+
     schema_parser = subparsers.add_parser("schema", help="Export the dataset schema as JSON Schema")
     schema_parser.add_argument("data", help="Path to the dataset")
     schema_parser.add_argument("--title", default=None, help="Schema title (defaults to the file stem)")
@@ -1399,7 +1410,113 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
-def _issue_key(issue: dict) -> str:
+def _load_report_json(path: str) -> dict | None:
+    """Load a saved audit-report JSON. Returns None on error (printing a message)."""
+    import json
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError as exc:
+        print(f"Cannot read report '{path}': {exc}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as exc:
+        print(
+            f"Report '{path}' is not valid JSON: {exc}. "
+            "Reports come from `audit --save-json`.",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _cmd_profile_diff(args: argparse.Namespace) -> int:
+    """Compare two saved reports' column profiles side by side."""
+    from dataset_audit_kit.core import AuditReport
+
+    before_dict = _load_report_json(args.baseline)
+    after_dict = _load_report_json(args.current)
+    if before_dict is None or after_dict is None:
+        return 2
+
+    before = AuditReport(
+        rows=before_dict.get("rows", 0),
+        columns=before_dict.get("columns", 0),
+        duplicate_rows=before_dict.get("duplicate_rows", 0),
+        missing_cells=before_dict.get("missing_cells", 0),
+        missingness=before_dict.get("missingness", {}),
+        label_distribution=before_dict.get("label_distribution", {}),
+        drift_scores=before_dict.get("drift_scores", {}),
+        column_profiles=before_dict.get("column_profiles", {}),
+        issues=[],
+        risk_score=before_dict.get("risk_score", 0.0),
+        audit_id=before_dict.get("audit_id"),
+        created_utc=before_dict.get("created_utc"),
+        config_hash=before_dict.get("config_hash"),
+    )
+    after = AuditReport(
+        rows=after_dict.get("rows", 0),
+        columns=after_dict.get("columns", 0),
+        duplicate_rows=after_dict.get("duplicate_rows", 0),
+        missing_cells=after_dict.get("missing_cells", 0),
+        missingness=after_dict.get("missingness", {}),
+        label_distribution=after_dict.get("label_distribution", {}),
+        drift_scores=after_dict.get("drift_scores", {}),
+        column_profiles=after_dict.get("column_profiles", {}),
+        issues=[],
+        risk_score=after_dict.get("risk_score", 0.0),
+        audit_id=after_dict.get("audit_id"),
+        created_utc=after_dict.get("created_utc"),
+        config_hash=after_dict.get("config_hash"),
+    )
+
+    columns = args.columns.split(",") if args.columns else None
+    rows = before.profile_diff(
+        after,
+        columns=columns,
+        include_categorical=not args.numeric_only,
+    )
+    if not rows:
+        print("No shared columns to compare.")
+        return 0
+
+    if args.json:
+        import json
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+
+    import csv
+    import io
+    if args.csv:
+        if rows:
+            fieldnames = list(rows[0])
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: ("" if v is None else str(v)) for k, v in row.items()})
+            print(buf.getvalue().rstrip("\r\n"))
+        return 0
+
+    headers = list(rows[0])
+    widths = {h: len(h) for h in headers}
+    formatted = []
+    for row in rows:
+        line = []
+        display = {}
+        for key in headers:
+            value = row.get(key)
+            text = "" if value is None else str(value)
+            display[key] = text
+            widths[key] = max(widths[key], len(text))
+        formatted.append(display)
+
+    header_line = " | ".join(h.ljust(widths[h]) for h in headers)
+    sep_line = "-+-".join("-" * widths[h] for h in headers)
+    print(header_line)
+    print(sep_line)
+    for display in formatted:
+        print(" | ".join(display[h].ljust(widths[h]) for h in headers))
+    return 0
     """Identify an issue by what it is about, not by its wording."""
     check = issue.get("check", "?")
     column = issue.get("column")
@@ -1995,6 +2112,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_validate_config(args)
     elif args.command == "diff":
         return _cmd_diff(args)
+    elif args.command == "profile-diff":
+        return _cmd_profile_diff(args)
     elif args.command == "refs":
         return _cmd_refs(args)
     else:
