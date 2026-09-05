@@ -15,6 +15,7 @@ from typing import Sequence
 from xml.etree import ElementTree
 
 import pandas as pd
+import numpy as np
 
 #: Compression suffixes pandas can infer from a filename, for text formats.
 COMPRESSION_SUFFIXES = frozenset({".gz", ".bz2", ".zip", ".xz", ".zst"})
@@ -3744,8 +3745,11 @@ class DatasetAuditor:
 
             if pd.api.types.is_numeric_dtype(current) and pd.api.types.is_numeric_dtype(baseline):
                 score = self._numeric_drift(current, baseline)
+                psi_score = self.population_stability_index(baseline, current)
+                drift_scores[f"{column}__psi"] = psi_score
             else:
                 score = self._categorical_drift(current.astype(str), baseline.astype(str))
+                psi_score = None
 
             drift_scores[column] = score
             rule = self.rules.columns.get(column) if self.rules is not None else None
@@ -3762,6 +3766,17 @@ class DatasetAuditor:
                         message=f"Drift score {score:.3f} exceeds the {threshold:.3f} threshold.",
                         column=column,
                         observed=score,
+                        threshold=threshold,
+                    )
+                )
+            if psi_score is not None and psi_score >= threshold:
+                issues.append(
+                    AuditIssue(
+                        check="psi",
+                        severity="warning",
+                        message=f"PSI {psi_score:.3f} exceeds the {threshold:.3f} threshold.",
+                        column=column,
+                        observed=psi_score,
                         threshold=threshold,
                     )
                 )
@@ -3886,6 +3901,41 @@ class DatasetAuditor:
         for category in categories:
             divergence += abs(float(current_dist.get(category, 0.0)) - float(baseline_dist.get(category, 0.0)))
         return divergence / 2.0
+
+    @staticmethod
+    def population_stability_index(
+        baseline: pd.Series,
+        current: pd.Series,
+        bins: int = 10,
+    ) -> float:
+        """Population Stability Index (PSI) between two numeric samples.
+
+        The *baseline* distribution is split into ``bins`` equal-frequency
+        buckets using its own quantiles; the *current* sample is measured
+        against those same buckets. PSI sums
+        ``(p_current - p_base) * ln(p_current / p_base)`` over the buckets.
+
+        Conventional interpretation: PSI < 0.1 signals no material shift,
+        0.1-0.25 a moderate one, and above 0.25 a large one. A value of 0.0
+        means the two samples are distributionally identical within the
+        chosen binning. Values outside the baseline range are folded into the
+        nearest edge bucket, matching the standard PSI convention.
+        """
+        baseline_vals = pd.to_numeric(baseline, errors="coerce").dropna().to_numpy()
+        current_vals = pd.to_numeric(current, errors="coerce").dropna().to_numpy()
+        if baseline_vals.size < 2 or current_vals.size < 1:
+            return 0.0
+        n_bins = max(2, min(int(bins), baseline_vals.size))
+        edges = np.quantile(baseline_vals, [i / n_bins for i in range(n_bins + 1)])
+        edges = np.unique(edges)
+        if edges.size < 2:
+            return 0.0
+        base_counts, _ = np.histogram(baseline_vals, bins=edges)
+        current_counts, _ = np.histogram(current_vals, bins=edges)
+        base_pct = np.clip(base_counts / baseline_vals.size, 1e-6, None)
+        current_pct = np.clip(current_counts / current_vals.size, 1e-6, None)
+        psi = float(np.sum((current_pct - base_pct) * np.log(current_pct / base_pct)))
+        return max(psi, 0.0)
 
     @staticmethod
     def _check_redundancy(
