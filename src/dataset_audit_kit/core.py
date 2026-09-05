@@ -1073,6 +1073,15 @@ class AuditReport:
                         f"Std: {_format_stat(profile.get('std'))}"
                     )
                     lines.append(f"- Quartiles: Q1={profile.get('q25', '?')} Q2={profile.get('q50', '?')} Q3={profile.get('q75', '?')}")
+                elif dtype == "datetime":
+                    lines.append(f"- Range: {profile.get('min', '?')} - {profile.get('max', '?')}")
+                    lines.append(f"- Mean: {profile.get('mean', '?')}")
+                    std_s = profile.get("std_seconds")
+                    if std_s is not None:
+                        lines.append(f"- Std: {_format_stat(std_s)} seconds")
+                    rng_s = profile.get("range_seconds")
+                    if rng_s is not None:
+                        lines.append(f"- Span: {_format_stat(rng_s)} seconds")
                 elif dtype == "categorical":
                     top_val = profile.get("top", "?")
                     top_freq = profile.get("freq", "?")
@@ -1272,6 +1281,14 @@ class AuditReport:
                         f"<tr><td>Q1</td><td>{esc(_format_stat(profile.get('q25')))}</td></tr>",
                         f"<tr><td>Q2 (median)</td><td>{esc(_format_stat(profile.get('q50')))}</td></tr>",
                         f"<tr><td>Q3</td><td>{esc(_format_stat(profile.get('q75')))}</td></tr>",
+                    ])
+                elif dtype == "datetime":
+                    profile_sections.extend([
+                        f"<tr><td>Min</td><td>{esc(profile.get('min', '?'))}</td></tr>",
+                        f"<tr><td>Max</td><td>{esc(profile.get('max', '?'))}</td></tr>",
+                        f"<tr><td>Mean</td><td>{esc(profile.get('mean', '?'))}</td></tr>",
+                        f"<tr><td>Std (seconds)</td><td>{esc(_format_stat(profile.get('std_seconds')))}</td></tr>",
+                        f"<tr><td>Span (seconds)</td><td>{esc(_format_stat(profile.get('range_seconds')))}</td></tr>",
                     ])
                 elif dtype == "categorical":
                     top_val = profile.get("top", "?")
@@ -3876,6 +3893,18 @@ class DatasetAuditor:
                     profile["kurtosis"] = float(vals.kurtosis())
                     profile["outliers_iqr"] = outliers
                     profile["outlier_ratio"] = round(outliers / max(len(vals), 1), 4)
+            elif pd.api.types.is_datetime64_any_dtype(col):
+                profile["dtype"] = "datetime"
+                if len(non_null) > 0:
+                    profile["min"] = non_null.min().isoformat()
+                    profile["max"] = non_null.max().isoformat()
+                    profile["mean"] = non_null.mean().isoformat()
+                    spread = non_null.std(ddof=0)
+                    profile["std_seconds"] = (
+                        float(spread.total_seconds()) if spread is not pd.NaT else 0.0
+                    )
+                    span = non_null.max() - non_null.min()
+                    profile["range_seconds"] = float(span.total_seconds())
             elif isinstance(col.dtype, pd.CategoricalDtype) or col.dtype == object or pd.api.types.is_string_dtype(col):
                 profile["dtype"] = "categorical"
                 if len(non_null) > 0:
