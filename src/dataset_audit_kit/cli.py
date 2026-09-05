@@ -472,6 +472,7 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
     diff_parser.add_argument("current", help="Path to the later report")
     diff_parser.add_argument("--fail-on-regression", action="store_true", help="Exit 1 if quality dropped or issues were added")
+    diff_parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON report instead of a table")
 
     profile_diff_parser = subparsers.add_parser(
         "profile-diff",
@@ -1337,6 +1338,11 @@ def _cmd_refs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _item_key(issue: dict) -> str:
+    """Stable identity for an audit finding across two saved reports."""
+    return f"{issue.get('check', '')}:{issue.get('column') or ''}"
+
+
 def _cmd_diff(args: argparse.Namespace) -> int:
     """Handle the diff subcommand."""
     import json
@@ -1363,10 +1369,10 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         value = report.get(key, 0)
         return float(value) if isinstance(value, (int, float)) else 0.0
 
-    print(f"{'Metric':<20}{'baseline':>12}{'current':>12}{'change':>12}")
-    print("-" * 56)
+    metric_keys = ("quality_score", "rows", "columns", "duplicate_rows", "missing_cells")
+    metrics: dict[str, dict[str, object]] = {}
     regressed = False
-    for key in ("quality_score", "rows", "columns", "duplicate_rows", "missing_cells"):
+    for key in metric_keys:
         old, new = _num(before, key), _num(after, key)
         delta = new - old
         # Higher is better for quality_score; for the rest, higher is worse.
@@ -1374,16 +1380,49 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             worse = delta < 0
         else:
             worse = delta > 0 and key in {"duplicate_rows", "missing_cells"}
+        metrics[str(key)] = {
+            "baseline": old,
+            "current": new,
+            "change": delta,
+            "worsened": worse,
+        }
         regressed = regressed or worse
-        marker = "  <-- worse" if worse else ""
-        print(f"{key:<20}{old:>12.0f}{new:>12.0f}{delta:>+12.0f}{marker}")
 
-    old_issues = {_issue_key(i) for i in before.get("issues", [])}
-    new_issues = {_issue_key(i) for i in after.get("issues", [])}
-
+    old_issues = {_item_key(i) for i in before.get("issues", [])}
+    new_issues = {_item_key(i) for i in after.get("issues", [])}
     added = sorted(new_issues - old_issues)
     resolved = sorted(old_issues - new_issues)
     regressed = regressed or bool(added)
+
+    before_columns = set(before.get("column_profiles", {}))
+    after_columns = set(after.get("column_profiles", {}))
+    dropped = sorted(before_columns - after_columns)
+    gained = sorted(after_columns - before_columns)
+    regressed = regressed or bool(dropped)
+
+    if args.json:
+        payload = {
+            "metrics": metrics,
+            "issues": {
+                "baseline_count": len(old_issues),
+                "current_count": len(new_issues),
+                "added": added,
+                "resolved": resolved,
+            },
+            "schema_changes": {"dropped": dropped, "gained": gained},
+            "regression_detected": regressed,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        if args.fail_on_regression and regressed:
+            return 1
+        return 0
+
+    print(f"{'Metric':<20}{'baseline':>12}{'current':>12}{'change':>12}")
+    print("-" * 56)
+    for key in metric_keys:
+        m = metrics[str(key)]
+        marker = "  <-- worse" if m["worsened"] else ""
+        print(f"{key:<20}{m['baseline']:>12.0f}{m['current']:>12.0f}{m['change']:>+12.0f}{marker}")
 
     print()
     print(f"Issues: {len(old_issues)} -> {len(new_issues)} "
@@ -1393,9 +1432,6 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     for key in resolved:
         print(f"  - {key}")
 
-    before_columns = set(before.get("column_profiles", {}))
-    after_columns = set(after.get("column_profiles", {}))
-    dropped, gained = sorted(before_columns - after_columns), sorted(after_columns - before_columns)
     if dropped or gained:
         print()
         print("Schema changes:")
@@ -1403,7 +1439,6 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             print(f"  - {column} (dropped)")
         for column in gained:
             print(f"  + {column} (new)")
-        regressed = regressed or bool(dropped)
 
     if args.fail_on_regression and regressed:
         return 1
