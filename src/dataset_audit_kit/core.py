@@ -2120,6 +2120,7 @@ class DatasetAuditor:
         missing_cooccurrence_check: bool = False,
         missing_cooccurrence_min_count: int = 1,
         missing_cooccurrence_top: int | None = 10,
+        ks_alpha: float = 0.05,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -2127,6 +2128,13 @@ class DatasetAuditor:
             raise ValueError("max_duplicate_ratio must be between 0 and 1")
         if not 0.0 <= null_pattern_threshold <= 1.0:
             raise ValueError("null_pattern_threshold must be between 0 and 1")
+        if (
+            isinstance(ks_alpha, bool)
+            or not isinstance(ks_alpha, (int, float))
+            or not math.isfinite(float(ks_alpha))
+            or not 0.0 <= float(ks_alpha) <= 1.0
+        ):
+            raise ValueError("ks_alpha must be a number between 0 and 1")
         if (
             isinstance(missing_cooccurrence_min_count, bool)
             or not isinstance(missing_cooccurrence_min_count, int)
@@ -2197,6 +2205,7 @@ class DatasetAuditor:
         self.missing_cooccurrence_check = missing_cooccurrence_check
         self.missing_cooccurrence_min_count = missing_cooccurrence_min_count
         self.missing_cooccurrence_top = missing_cooccurrence_top
+        self.ks_alpha = float(ks_alpha)
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -3818,7 +3827,24 @@ class DatasetAuditor:
             if pd.api.types.is_numeric_dtype(current) and pd.api.types.is_numeric_dtype(baseline):
                 score = self._numeric_drift(current, baseline)
                 psi_score = self.population_stability_index(baseline, current)
+                ks_stat, ks_pvalue = self.kolmogorov_smirnov_test(baseline, current)
                 drift_scores[f"{column}__psi"] = psi_score
+                drift_scores[f"{column}__ks_stat"] = ks_stat
+                drift_scores[f"{column}__ks_pvalue"] = ks_pvalue
+                if ks_pvalue < self.ks_alpha:
+                    issues.append(
+                        AuditIssue(
+                            check="ks_drift",
+                            severity="warning",
+                            message=(
+                                f"KS test for '{column}' is significant "
+                                f"(D={ks_stat:.3f}, p={ks_pvalue:.3g} < ks_alpha={self.ks_alpha})."
+                            ),
+                            column=column,
+                            observed=ks_pvalue,
+                            threshold=self.ks_alpha,
+                        )
+                    )
             else:
                 score = self._categorical_drift(current.astype(str), baseline.astype(str))
                 psi_score = None
@@ -4020,6 +4046,56 @@ class DatasetAuditor:
         current_pct = np.clip(current_counts / current_vals.size, 1e-6, None)
         psi = float(np.sum((current_pct - base_pct) * np.log(current_pct / base_pct)))
         return max(psi, 0.0)
+
+    @staticmethod
+    def kolmogorov_smirnov_test(
+        baseline: pd.Series, current: pd.Series
+    ) -> tuple[float, float]:
+        """Two-sample Kolmogorov-Smirnov statistic and asymptotic p-value.
+
+        Returns ``(D, p``) where ``D`` is the maximum absolute difference
+        between the empirical CDFs of the two samples and ``p`` is a
+        two-sided p-value from the asymptotic Kolmogorov distribution. The
+        test is distribution-shape aware, so unlike the mean-ratio and PSI
+        signals it also flags location-preserving shape drift such as a
+        bimodally-shifted or spread-out distribution. No scipy dependency:
+        the p-value uses the standard Stephens continuity-corrected argument
+        into the Kolmogorov survival series. Samples with fewer than two
+        observed values return ``(0.0, 1.0)``.
+        """
+
+        base_vals = pd.to_numeric(baseline, errors="coerce").dropna().to_numpy()
+        current_vals = pd.to_numeric(current, errors="coerce").dropna().to_numpy()
+        n = base_vals.size
+        m = current_vals.size
+        if n < 2 or m < 2:
+            return 0.0, 1.0
+        x = np.sort(base_vals)
+        y = np.sort(current_vals)
+        combined = np.concatenate([x, y])
+        cdf_base = np.searchsorted(x, combined, side="right") / n
+        cdf_current = np.searchsorted(y, combined, side="right") / m
+        d = float(np.max(np.abs(cdf_base - cdf_current)))
+        p = float(DatasetAuditor._ks_asymptotic_pvalue(d, n, m))
+        return d, p
+
+    @staticmethod
+    def _ks_asymptotic_pvalue(d: float, n: int, m: int) -> float:
+        """Asymptotic two-sided p-value for the Kolmogorov-Smirnov statistic."""
+
+        en = np.sqrt(n * m / (n + m))
+        z = (en + 0.12 + 0.11 / en) * d
+        if z <= 0.0:
+            return 1.0
+        series = 0.0
+        k = 1
+        while k <= 100:
+            term = ((-1) ** (k - 1)) * np.exp(-2.0 * k * k * z * z)
+            series += term
+            if abs(term) < 1e-12:
+                break
+            k += 1
+        return float(min(max(2.0 * series, 0.0), 1.0))
 
     @staticmethod
     def _check_redundancy(

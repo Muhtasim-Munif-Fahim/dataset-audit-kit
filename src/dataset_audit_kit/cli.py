@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drift score threshold before warning",
     )
     audit.add_argument(
+        "--ks-alpha",
+        type=float,
+        default=0.05,
+        help="Significance level for the two-sample KS drift test (default: 0.05)",
+    )
+    audit.add_argument(
         "--fail-on",
         choices=["warning", "error"],
         default="warning",
@@ -324,6 +330,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Drift score threshold before warning",
+    )
+    check.add_argument(
+        "--ks-alpha",
+        type=float,
+        default=0.05,
+        help="Significance level for the two-sample KS drift test (default: 0.05)",
     )
     check.add_argument(
         "--fail-on",
@@ -770,6 +782,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         missing_cooccurrence_check=args.check_missing_cooccurrence,
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
+        ks_alpha=args.ks_alpha,
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -948,6 +961,7 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "reference": args.reference,
         "rules_file": args.rules,
         "rules_profile": args.profile,
+        "ks_alpha": args.ks_alpha,
         "max_category_share": getattr(args, "max_category_share", None),
         "rare_category_share": getattr(args, "rare_category_share", None),
     }
@@ -1090,6 +1104,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         missing_cooccurrence_check=args.check_missing_cooccurrence,
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
+        ks_alpha=args.ks_alpha,
     )
     report = auditor.audit_file(
         args.data,
