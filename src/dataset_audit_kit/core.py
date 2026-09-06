@@ -1113,6 +1113,11 @@ class AuditReport:
                     top_val = profile.get("top", "?")
                     top_freq = profile.get("freq", "?")
                     lines.append(f"- Top value: {top_val} ({top_freq})")
+                    if "entropy" in profile:
+                        lines.append(
+                            f"- Entropy: {_format_stat(profile.get('entropy'))} "
+                            f"(normalized: {_format_stat(profile.get('normalized_entropy'))})"
+                        )
 
         if self.label_distribution:
             lines.extend(["", "## Label distribution"])
@@ -1323,6 +1328,11 @@ class AuditReport:
                     profile_sections.extend([
                         f"<tr><td>Top value</td><td>{esc(str(top_val))} ({top_freq})</td></tr>",
                     ])
+                    if "entropy" in profile:
+                        profile_sections.extend([
+                            f"<tr><td>Entropy</td><td>{esc(_format_stat(profile.get('entropy')))}</td></tr>",
+                            f"<tr><td>Normalized entropy</td><td>{esc(_format_stat(profile.get('normalized_entropy')))}</td></tr>",
+                        ])
                 profile_sections.append("</table></details>")
             sections.extend(profile_sections)
 
@@ -3996,6 +4006,15 @@ class DatasetAuditor:
                     profile["top_5"] = {
                         str(k): int(v) for k, v in value_counts.head(5).items()
                     }
+                    counts = value_counts.to_numpy(dtype=float)
+                    total = counts.sum()
+                    probs = counts[total > 0] / total
+                    probs = probs[probs > 0]
+                    entropy = float(-np.sum(probs * np.log2(probs))) if probs.size else 0.0
+                    n_unique = int(value_counts.shape[0])
+                    norm = float(entropy / np.log2(n_unique)) if n_unique > 1 else 0.0
+                    profile["entropy"] = entropy
+                    profile["normalized_entropy"] = norm
             else:
                 profile["dtype"] = "other"
 
