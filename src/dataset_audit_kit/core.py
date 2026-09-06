@@ -59,6 +59,16 @@ NULL_PATTERNS = frozenset({
 #: Lowercased version for case-insensitive matching.
 NULL_PATTERNS_LOWER = {p.lower() for p in NULL_PATTERNS}
 
+#: Accepted values for :attr:`ColumnRule.monotonic`.
+_MONOTONIC_MODES = frozenset(
+    {
+        "increasing",
+        "decreasing",
+        "strictly_increasing",
+        "strictly_decreasing",
+    }
+)
+
 #: (kind, compiled regex) pairs scanned by the opt-in sensitive-data check.
 #: The patterns are heuristics for obvious PII shapes in text columns, not
 #: guarantees: matches should be confirmed before acting on them.
@@ -225,6 +235,13 @@ class ColumnRule:
     max_drift : float | None
         Maximum drift score allowed for this column when a reference dataset is
         supplied. Overrides the auditor-wide ``drift_threshold``.
+    monotonic : str | None
+        Asserts an ordering for numeric or datetime columns that must hold over
+        the non-missing values in row order. One of ``"increasing"``,
+        ``"decreasing"``, ``"strictly_increasing"``, or
+        ``"strictly_decreasing"``. Useful for index, timestamp, and cumulative
+        counter columns where a direction reversal signals a pipeline inversion.
+        ``strictly_*`` requires every pair of consecutive values to differ.
     """
 
     name: str
@@ -250,6 +267,7 @@ class ColumnRule:
     max_outlier_ratio: float | None = None
     percentile_fences: tuple[float, float] | None = None
     max_drift: float | None = None
+    monotonic: str | None = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +421,13 @@ class ValidationRules:
                     raise ValueError(
                         f"max_drift for column '{col_name}' must be a non-negative number"
                     )
+            monotonic = col_config.get("monotonic")
+            if monotonic is not None:
+                if not isinstance(monotonic, str) or monotonic not in _MONOTONIC_MODES:
+                    raise ValueError(
+                        f"monotonic for column '{col_name}' must be one of "
+                        f"{sorted(_MONOTONIC_MODES)}, got {monotonic!r}"
+                    )
             min_date = col_config.get("min_date")
             max_date = col_config.get("max_date")
             for bound, label in ((min_date, "min_date"), (max_date, "max_date")):
@@ -481,6 +506,7 @@ class ValidationRules:
                 ),
                 percentile_fences=percentile_fences,
                 max_drift=float(max_drift) if max_drift is not None else None,
+                monotonic=monotonic,
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -615,6 +641,7 @@ class ValidationRules:
                 "max_date",
                 "max_outlier_ratio",
                 "max_drift",
+                "monotonic",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -3653,6 +3680,34 @@ class DatasetAuditor:
                                 ),
                                 column=column_name,
                                 observed=violations,
+                            )
+                        )
+
+            # --- monotonicity contract ---
+            if rule.monotonic is not None:
+                ordered = col_data.dropna()
+                is_ordered = pd.api.types.is_numeric_dtype(col_data) or pd.api.types.is_datetime64_any_dtype(
+                    col_data
+                )
+                if is_ordered and len(ordered) >= 2:
+                    if rule.monotonic == "increasing":
+                        failed = not ordered.is_monotonic_increasing
+                    elif rule.monotonic == "decreasing":
+                        failed = not ordered.is_monotonic_decreasing
+                    elif rule.monotonic == "strictly_increasing":
+                        failed = not (ordered.is_monotonic_increasing and ordered.is_unique)
+                    else:
+                        failed = not (ordered.is_monotonic_decreasing and ordered.is_unique)
+                    if failed:
+                        issues.append(
+                            AuditIssue(
+                                check="rule",
+                                severity="warning",
+                                message=(
+                                    f"Column '{column_name}' is not "
+                                    f"{rule.monotonic.replace('_', ' ')} as required."
+                                ),
+                                column=column_name,
                             )
                         )
 
