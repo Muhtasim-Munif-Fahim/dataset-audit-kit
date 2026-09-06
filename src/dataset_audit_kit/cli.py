@@ -1786,6 +1786,9 @@ def _build_config_template(*, with_profiles: bool, minimal: bool) -> dict:
             "max_outlier_ratio": 0.05,
             # Alternative to the IQR rule: count outliers beyond quantile fences.
             # "percentile_fences": [0.01, 0.99],
+            # Z-score outlier flagging: numeric values more than N population
+            # standard deviations from the mean are flagged.
+            # "max_zscore": 3.0,
         },
         # Relational constraints between pairs of columns (optional)
         "cross": [
@@ -1844,6 +1847,7 @@ def _minimal_template() -> dict:
             "max_unique": 20,
             "max_outlier_ratio": 0.10,
             "max_drift": 0.20,
+            "max_zscore": 3.0,
         },
         "cross": [
             {"left": "col_a", "op": "le", "right": "col_b", "missing_ok": True}

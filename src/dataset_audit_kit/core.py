@@ -242,6 +242,14 @@ class ColumnRule:
         ``"strictly_decreasing"``. Useful for index, timestamp, and cumulative
         counter columns where a direction reversal signals a pipeline inversion.
         ``strictly_*`` requires every pair of consecutive values to differ.
+    max_zscore : float | None
+        When set, flags numeric values that deviate from the column mean by more
+        than this many population standard deviations (a z-score outlier check).
+        Complements the IQR / percentile-fence ``max_outlier_ratio`` path: the
+        latter is robust to heavy tails, while the z-score rule is sensitive to
+        any value stretching the mean-based spread. Only applies to numeric
+        columns; non-numeric columns skip this check. Requires at least two
+        non-missing values and a non-zero standard deviation.
     """
 
     name: str
@@ -268,6 +276,7 @@ class ColumnRule:
     percentile_fences: tuple[float, float] | None = None
     max_drift: float | None = None
     monotonic: str | None = None
+    max_zscore: float | None = None
 
 
 @dataclass(frozen=True)
@@ -428,6 +437,17 @@ class ValidationRules:
                         f"monotonic for column '{col_name}' must be one of "
                         f"{sorted(_MONOTONIC_MODES)}, got {monotonic!r}"
                     )
+            max_zscore = col_config.get("max_zscore")
+            if max_zscore is not None:
+                if (
+                    isinstance(max_zscore, bool)
+                    or not isinstance(max_zscore, (int, float))
+                    or not math.isfinite(float(max_zscore))
+                    or float(max_zscore) <= 0.0
+                ):
+                    raise ValueError(
+                        f"max_zscore for column '{col_name}' must be a positive number"
+                    )
             min_date = col_config.get("min_date")
             max_date = col_config.get("max_date")
             for bound, label in ((min_date, "min_date"), (max_date, "max_date")):
@@ -507,6 +527,7 @@ class ValidationRules:
                 percentile_fences=percentile_fences,
                 max_drift=float(max_drift) if max_drift is not None else None,
                 monotonic=monotonic,
+                max_zscore=float(max_zscore) if max_zscore is not None else None,
             )
         cross_rules: list[CrossColumnRule] = []
         for entry in raw_cross:
@@ -642,6 +663,7 @@ class ValidationRules:
                 "max_outlier_ratio",
                 "max_drift",
                 "monotonic",
+                "max_zscore",
             ):
                 value = getattr(rule, attr)
                 if value is not None:
@@ -3501,6 +3523,31 @@ class DatasetAuditor:
                                     column=column_name,
                                     observed=total_outliers,
                                     threshold=allowed_ratio,
+                                )
+                            )
+
+            # --- z-score outlier detection ---
+            if rule.max_zscore is not None:
+                numeric = pd.to_numeric(col_data.dropna(), errors="coerce")
+                if len(numeric) >= 2:
+                    mean = float(numeric.mean())
+                    std = float(numeric.std(ddof=0))
+                    if std > 0:
+                        z_scores = (numeric - mean) / std
+                        violations = int((z_scores.abs() > rule.max_zscore).sum())
+                        if violations:
+                            issues.append(
+                                AuditIssue(
+                                    check="rule",
+                                    severity="warning",
+                                    message=(
+                                        f"{violations} value(s) exceed the z-score "
+                                        f"threshold of {rule.max_zscore} "
+                                        f"({violations / len(numeric):.1%} of values)."
+                                    ),
+                                    column=column_name,
+                                    observed=float(violations),
+                                    threshold=rule.max_zscore,
                                 )
                             )
 
