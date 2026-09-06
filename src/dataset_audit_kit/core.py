@@ -3848,6 +3848,7 @@ class DatasetAuditor:
             else:
                 score = self._categorical_drift(current.astype(str), baseline.astype(str))
                 psi_score = None
+                self._categorical_level_drift(current, baseline, issues, column)
 
             drift_scores[column] = score
             rule = self.rules.columns.get(column) if self.rules is not None else None
@@ -4011,6 +4012,61 @@ class DatasetAuditor:
         for category in categories:
             divergence += abs(float(current_dist.get(category, 0.0)) - float(baseline_dist.get(category, 0.0)))
         return divergence / 2.0
+
+    @staticmethod
+    def _categorical_level_drift(
+        current: pd.Series,
+        baseline: pd.Series,
+        issues: list[AuditIssue],
+        column: str,
+    ) -> None:
+        """Flag categorical levels that exist in one sample but not the other.
+
+        The total-variation drift score above collapses every level into a
+        single number, so a brand-new (or dropped) category only nudges it
+        depending on frequency. Level-set drift instead enumerates the exact
+        labels that appeared or disappeared, which is the actionable signal for
+        a categorical feature whose value domain has shifted. Numeric columns
+        are skipped here because they take the PSI/KS path; stringifying a
+        numeric column would manufacture spurious levels.
+        """
+
+        def _levels(series: pd.Series) -> set[str]:
+            return {str(value) for value in series.dropna().unique()}
+
+        if pd.api.types.is_numeric_dtype(current) or pd.api.types.is_numeric_dtype(baseline):
+            return
+
+        current_levels = _levels(current)
+        baseline_levels = _levels(baseline)
+        new_levels = sorted(current_levels - baseline_levels)
+        removed_levels = sorted(baseline_levels - current_levels)
+        if not new_levels and not removed_levels:
+            return
+        parts: list[str] = []
+        if new_levels:
+            parts.append(
+                f"{len(new_levels)} new ({', '.join(new_levels[:5])}"
+                + (" ..." if len(new_levels) > 5 else "")
+                + ")"
+            )
+        if removed_levels:
+            parts.append(
+                f"{len(removed_levels)} removed ({', '.join(removed_levels[:5])}"
+                + (" ..." if len(removed_levels) > 5 else "")
+                + ")"
+            )
+        issues.append(
+            AuditIssue(
+                check="category_level_drift",
+                severity="warning",
+                message=(
+                    f"Category level drift for '{column}': " + ", ".join(parts) + "."
+                ),
+                column=column,
+                observed=len(new_levels) + len(removed_levels),
+            )
+        )
 
     @staticmethod
     def population_stability_index(
