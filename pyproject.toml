@@ -18,7 +18,9 @@ dependencies = [
   "pyarrow>=17.0.0",
   # The `hist` subcommand bins values with numpy directly, so it is a
   # first-order dependency rather than something inherited from pandas.
-  "numpy>=1.26"
+  "numpy>=1.26",
+  # YAML serialization for --yaml-out and AuditReport.to_yaml.
+  "PyYAML>=6.0",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

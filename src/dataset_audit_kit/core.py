@@ -1095,6 +1095,17 @@ class AuditReport:
             json.dumps(issue.__dict__) + "\n" for issue in self.issues
         )
 
+    def to_yaml(self, *, indent: int = 2) -> str:
+        """Serialize the report as YAML for pipeline-consumption.
+
+        Uses the same payload as :meth:`to_dict`, so the output is stable
+        across JSON and YAML consumers. Requires PyYAML.
+        """
+
+        import yaml
+
+        return yaml.safe_dump(self.to_dict(), sort_keys=True, indent=indent, default_flow_style=False)
+
     def to_markdown(self) -> str:
         lines = [
             "# Dataset Audit Report",
@@ -1707,6 +1718,9 @@ class AuditReport:
         - ``.md`` — Markdown format
         - ``.html`` — HTML format
         - ``.xml`` — JUnit XML format
+        - ``.csv`` — CSV format
+        - ``.jsonl`` — JSON Lines format
+        - ``.yaml`` / ``.yml`` — YAML format
 
         Parameters
         ----------
@@ -1733,10 +1747,12 @@ class AuditReport:
             content = self.to_csv()
         elif suffix == ".jsonl":
             content = self.to_jsonl()
+        elif suffix in (".yaml", ".yml"):
+            content = self.to_yaml()
         else:
             raise ValueError(
                 f"Unsupported report format '{suffix}'. "
-                "Supported formats are .json, .md, .html, .xml, .csv, .jsonl."
+                "Supported formats are .json, .md, .html, .xml, .csv, .jsonl, .yaml, .yml."
             )
 
         # `--save-json reports/today.json` should not fail because `reports/`
