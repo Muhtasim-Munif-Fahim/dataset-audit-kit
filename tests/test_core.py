@@ -1911,7 +1911,111 @@ class TestOutlierSummary:
                 "mean": None,
                 "std": None,
             }
-        ]
+         ]
+
+
+class TestCorrelationSummary:
+    def _make_report(self, issues: list[AuditIssue]) -> AuditReport:
+        report = AuditReport(rows=10, columns=3, duplicate_rows=0, missing_cells=0)
+        report.issues = issues
+        return report
+
+    def test_extracts_redundancy_issues_sorted_by_correlation(self) -> None:
+        report = self._make_report(
+            [
+                AuditIssue(
+                    check="redundancy",
+                    severity="warning",
+                    message="Columns 'a' and 'b' are highly correlated (|r| = 0.970), suggesting redundancy.",
+                    column="a,b",
+                    observed=0.97,
+                    threshold=0.95,
+                ),
+                AuditIssue(
+                    check="redundancy",
+                    severity="warning",
+                    message="Columns 'c' and 'd' are highly correlated (|r| = 0.820), suggesting redundancy.",
+                    column="c,d",
+                    observed=0.82,
+                    threshold=0.95,
+                ),
+            ]
+        )
+        rows = report.correlation_summary()
+        assert [row["column_a"] for row in rows] == ["a", "c"]
+        assert rows[0]["correlation"] == 0.97
+        assert rows[1]["correlation"] == 0.82
+
+    def test_min_correlation_filters_weak_pairs(self) -> None:
+        report = self._make_report(
+            [
+                AuditIssue(
+                    check="redundancy",
+                    severity="warning",
+                    message="Columns 'a' and 'b' are highly correlated (|r| = 0.50), suggesting redundancy.",
+                    column="a,b",
+                    observed=0.50,
+                    threshold=0.95,
+                ),
+                AuditIssue(
+                    check="redundancy",
+                    severity="warning",
+                    message="Columns 'c' and 'd' are highly correlated (|r| = 0.98), suggesting redundancy.",
+                    column="c,d",
+                    observed=0.98,
+                    threshold=0.95,
+                ),
+            ]
+        )
+        rows = report.correlation_summary(min_correlation=0.90)
+        assert len(rows) == 1
+        assert rows[0]["column_a"] == "c"
+
+    def test_top_argument_limits_results(self) -> None:
+        issues = []
+        for pair in [("a", "b"), ("c", "d"), ("e", "f")]:
+            issues.append(
+                AuditIssue(
+                    check="redundancy",
+                    severity="warning",
+                    message=f"Columns '{pair[0]}' and '{pair[1]}' are highly correlated.",
+                    column=f"{pair[0]},{pair[1]}",
+                    observed=0.99,
+                    threshold=0.95,
+                )
+            )
+        report = self._make_report(issues)
+        rows = report.correlation_summary(top=2)
+        assert len(rows) == 2
+
+    def test_non_redundancy_issues_are_skipped(self) -> None:
+        report = self._make_report(
+            [
+                AuditIssue(
+                    check="missing",
+                    severity="warning",
+                    message="Column 'a' has 30% missing.",
+                    column="a",
+                    observed=0.30,
+                    threshold=0.05,
+                )
+            ]
+        )
+        rows = report.correlation_summary()
+        assert rows == []
+
+    def test_no_redundancy_issues_returns_empty(self) -> None:
+        report = self._make_report([])
+        assert report.correlation_summary() == []
+
+    def test_invalid_arguments_are_rejected(self) -> None:
+        report = self._make_report([])
+        with pytest.raises(ValueError, match="top must be a positive integer"):
+            report.correlation_summary(top=0)
+        with pytest.raises(ValueError, match="min_correlation must be a number between 0 and 1"):
+            report.correlation_summary(min_correlation=1.5)
+        with pytest.raises(ValueError, match="min_correlation must be a number between 0 and 1"):
+            report.correlation_summary(min_correlation=-0.1)
 
 
 class TestProfileDiff:

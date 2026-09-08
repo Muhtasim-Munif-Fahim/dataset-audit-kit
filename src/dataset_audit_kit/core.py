@@ -1597,6 +1597,62 @@ class AuditReport:
         rows.sort(key=lambda row: (-float(row["outlier_ratio"]), -int(row["outliers_iqr"]), row["column"]))
         return rows[:top]
 
+    def correlation_summary(
+        self,
+        *,
+        top: int = 10,
+        min_correlation: float = 0.0,
+    ) -> list[dict[str, object]]:
+        """Surface highly correlated numeric column pairs from the audit report.
+
+        Extracts the redundancy findings already captured during the audit
+        pass (column pairs whose absolute Pearson correlation exceeded the
+        configured ``correlation_threshold``) and presents them as a
+        structured, sorted table. Only findings whose correlation meets
+        ``min_correlation`` are returned, so callers can widen or narrow the
+        lens without re-running the audit. Results are sorted by descending
+        correlation then alphabetically by column pair, making the most
+        redundant features appear first.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of pairs to return (must be a positive integer).
+        min_correlation:
+            Minimum absolute correlation for a pair to be included (0.0–1.0).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(min_correlation, (int, float))
+            or isinstance(min_correlation, bool)
+            or not 0.0 <= float(min_correlation) <= 1.0
+        ):
+            raise ValueError("min_correlation must be a number between 0 and 1")
+
+        rows: list[dict[str, object]] = []
+        for issue in self.issues:
+            if issue.check != "redundancy":
+                continue
+            r = float(issue.observed) if issue.observed is not None else 0.0
+            if r < float(min_correlation):
+                continue
+            cols = issue.message.split("'")[1::2]
+            if len(cols) != 2:
+                continue
+            col_a, col_b = sorted(cols)
+            rows.append(
+                {
+                    "column_a": col_a,
+                    "column_b": col_b,
+                    "correlation": r,
+                    "threshold": issue.threshold,
+                    "message": issue.message,
+                }
+            )
+        rows.sort(key=lambda row: (-float(row["correlation"]), row["column_a"], row["column_b"]))
+        return rows[:top]
+
     def profile_diff(
         self,
         other: "AuditReport",
