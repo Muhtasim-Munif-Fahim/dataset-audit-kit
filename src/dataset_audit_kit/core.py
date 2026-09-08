@@ -1653,6 +1653,122 @@ class AuditReport:
         rows.sort(key=lambda row: (-float(row["correlation"]), row["column_a"], row["column_b"]))
         return rows[:top]
 
+    def missingness_report(
+        self,
+        *,
+        top: int = 20,
+        min_ratio: float = 0.0,
+    ) -> list[dict[str, object]]:
+        """Surface columns with the highest missing-value ratios.
+
+        Reads the per-column missing ratios recorded during the audit pass
+        (``self.missingness``) and joins them with the column profiles so the
+        caller gets the absolute missing count alongside the ratio, dtype, and
+        total row count. Results are sorted by descending missing ratio then
+        alphabetically by column name for stable output.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive integer).
+        min_ratio:
+            Only include columns whose missing ratio is at least this value
+            (0.0–1.0).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(min_ratio, (int, float))
+            or isinstance(min_ratio, bool)
+            or not 0.0 <= float(min_ratio) <= 1.0
+        ):
+            raise ValueError("min_ratio must be a number between 0 and 1")
+
+        rows: list[dict[str, object]] = []
+        for column, ratio in self.missingness.items():
+            ratio_f = float(ratio)
+            if ratio_f < float(min_ratio):
+                continue
+            profile = self.column_profiles.get(column, {})
+            rows.append(
+                {
+                    "column": column,
+                    "missing_ratio": ratio_f,
+                    "missing_count": int(profile.get("missing", 0)),
+                    "total_rows": int(profile.get("count", self.rows)),
+                    "dtype": str(profile.get("dtype", "other")),
+                }
+            )
+        rows.sort(key=lambda row: (-float(row["missing_ratio"]), str(row["column"])))
+        return rows[:top]
+
+    def column_overlap_summary(
+        self,
+        other: "AuditReport",
+        *,
+        normalize: bool = True,
+    ) -> list[dict[str, object]]:
+        """Identify columns whose names overlap between two reports.
+
+        Overlap is computed after lowercasing and stripping whitespace from
+        every column label. Exact normalized-name matches are treated as
+        ``"exact"``; when both reports contain a normalized name but the
+        original labels differ, the overlap is ``"normalized"``. Columns
+        present in only one report are omitted from the result so the table
+        reflects shared structure rather than schema drift.
+
+        Parameters
+        ----------
+        other:
+            The report to compare against.
+        normalize:
+            When ``True``, column names are lowercased and stripped before
+            comparison, catching ``" User ID "`` and ``"user id"`` as the
+            same column. When ``False``, only exact original-name matches are
+            returned.
+        """
+        if other is None:
+            raise ValueError("other report must not be None")
+
+        left = self.column_profiles
+        right = other.column_profiles
+        if not normalize:
+            shared = sorted(set(left).intersection(right))
+            return [
+                {
+                    "column_left": name,
+                    "column_right": name,
+                    "normalized_name": name,
+                    "match_type": "exact",
+                }
+                for name in shared
+            ]
+
+        left_norm: dict[str, str] = {}
+        for name in left:
+            norm = name.strip().lower()
+            left_norm.setdefault(norm, name)
+        right_norm: dict[str, str] = {}
+        for name in right:
+            norm = name.strip().lower()
+            right_norm.setdefault(norm, name)
+
+        shared_norms = sorted(set(left_norm).intersection(right_norm))
+        rows: list[dict[str, object]] = []
+        for norm in shared_norms:
+            left_name = left_norm[norm]
+            right_name = right_norm[norm]
+            match_type = "exact" if left_name == right_name else "normalized"
+            rows.append(
+                {
+                    "column_left": left_name,
+                    "column_right": right_name,
+                    "normalized_name": norm,
+                    "match_type": match_type,
+                }
+            )
+        return rows
+
     def profile_diff(
         self,
         other: "AuditReport",

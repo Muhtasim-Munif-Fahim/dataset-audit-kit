@@ -2018,6 +2018,98 @@ class TestCorrelationSummary:
             report.correlation_summary(min_correlation=-0.1)
 
 
+class TestMissingnessReport:
+    def _make_report(self, missingness: dict[str, float], profiles: dict[str, dict[str, object]] | None = None) -> AuditReport:
+        report = AuditReport(rows=100, columns=len(missingness), duplicate_rows=0, missing_cells=0)
+        report.missingness = dict(missingness)
+        if profiles:
+            report.column_profiles = profiles
+        return report
+
+    def test_returns_rows_sorted_by_missing_ratio(self) -> None:
+        report = self._make_report(
+            {"a": 0.40, "b": 0.05, "c": 0.80},
+            profiles={
+                "a": {"missing": 40, "count": 100, "dtype": "numeric"},
+                "b": {"missing": 5, "count": 100, "dtype": "categorical"},
+                "c": {"missing": 80, "count": 100, "dtype": "numeric"},
+            },
+        )
+        rows = report.missingness_report()
+        assert [row["column"] for row in rows] == ["c", "a", "b"]
+
+    def test_top_argument_limits_results(self) -> None:
+        report = self._make_report(
+            {"a": 0.90, "b": 0.80, "c": 0.70, "d": 0.60},
+            profiles={col: {"missing": int(ratio * 100), "count": 100, "dtype": "numeric"} for col, ratio in [("a", 0.90), ("b", 0.80), ("c", 0.70), ("d", 0.60)]},
+        )
+        rows = report.missingness_report(top=2)
+        assert [row["column"] for row in rows] == ["a", "b"]
+
+    def test_min_ratio_filters_low_missing(self) -> None:
+        report = self._make_report(
+            {"noise": 0.40, "clean": 0.02},
+            profiles={
+                "noise": {"missing": 40, "count": 100, "dtype": "numeric"},
+                "clean": {"missing": 2, "count": 100, "dtype": "numeric"},
+            },
+        )
+        rows = report.missingness_report(min_ratio=0.10)
+        assert [row["column"] for row in rows] == ["noise"]
+
+    def test_empty_missingness_returns_empty(self) -> None:
+        report = self._make_report({})
+        assert report.missingness_report() == []
+
+    def test_invalid_arguments_are_rejected(self) -> None:
+        report = self._make_report({"a": 0.5})
+        with pytest.raises(ValueError, match="top must be a positive integer"):
+            report.missingness_report(top=0)
+        with pytest.raises(ValueError, match="min_ratio must be a number between 0 and 1"):
+            report.missingness_report(min_ratio=1.5)
+        with pytest.raises(ValueError, match="min_ratio must be a number between 0 and 1"):
+            report.missingness_report(min_ratio=-0.1)
+
+
+class TestColumnOverlapSummary:
+    def _make_report(self, columns: list[str]) -> AuditReport:
+        report = AuditReport(rows=10, columns=len(columns), duplicate_rows=0, missing_cells=0)
+        report.column_profiles = {name: {"dtype": "numeric", "count": 10, "missing": 0} for name in columns}
+        return report
+
+    def test_exact_name_matches(self) -> None:
+        left = self._make_report(["id", "name", "value"])
+        right = self._make_report(["id", "name", "amount"])
+        rows = left.column_overlap_summary(right)
+        assert {r["column_left"] for r in rows} == {"id", "name"}
+        assert all(r["match_type"] == "exact" for r in rows)
+
+    def test_normalized_matches_catch_whitespace_and_case(self) -> None:
+        left = self._make_report([" User ID ", "Revenue"])
+        right = self._make_report(["user id", "revenue "])
+        rows = left.column_overlap_summary(right)
+        assert len(rows) == 2
+        normalized_names = {r["normalized_name"] for r in rows}
+        assert normalized_names == {"user id", "revenue"}
+        assert all(r["match_type"] == "normalized" for r in rows)
+
+    def test_no_overlap_returns_empty(self) -> None:
+        left = self._make_report(["a", "b"])
+        right = self._make_report(["c", "d"])
+        assert left.column_overlap_summary(right) == []
+
+    def test_non_normalized_skips_fuzzy(self) -> None:
+        left = self._make_report(["User ID"])
+        right = self._make_report(["user_id"])
+        rows = left.column_overlap_summary(right, normalize=False)
+        assert rows == []
+
+    def test_none_other_raises(self) -> None:
+        report = self._make_report(["a"])
+        with pytest.raises(ValueError, match="other report must not be None"):
+            report.column_overlap_summary(None)
+
+
 class TestProfileDiff:
     def _numeric_profile(self, mean: float, std: float, *, count: int = 100, missing: int = 0,
                           outlier_ratio: float = 0.05, q25: float = 1.0, q75: float = 2.0,
