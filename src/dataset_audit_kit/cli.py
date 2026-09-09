@@ -608,6 +608,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cardinality_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
 
+    optimize_parser = subparsers.add_parser(
+        "optimize",
+        help="Report memory saved by narrowing column dtypes, and optionally write the result",
+    )
+    optimize_parser.add_argument("data", help="Path to the dataset")
+    optimize_parser.add_argument(
+        "--min-saved-bytes",
+        type=int,
+        default=0,
+        help="Only list columns saving at least this many bytes (default: 0)",
+    )
+    optimize_parser.add_argument("--out", default=None, help="Write the converted dataset to this CSV path")
+    optimize_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
+
     hist_parser = subparsers.add_parser("hist", help="Show ASCII histogram for a numeric column")
     hist_parser.add_argument("data", help="Path to the dataset")
     hist_parser.add_argument("--column", required=True, help="Numeric column name")
@@ -2120,6 +2134,66 @@ def _cmd_cardinality(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_optimize(args: argparse.Namespace) -> int:
+    """Handle the optimize subcommand."""
+    if args.min_saved_bytes < 0:
+        print("--min-saved-bytes must be a non-negative integer")
+        return 1
+
+    data = _load(args)
+    report = DatasetAuditor.memory_optimization_report(
+        data, min_saved_bytes=args.min_saved_bytes
+    )
+
+    if args.out:
+        converted, _ = DatasetAuditor.apply_optimal_dtypes(data)
+        converted.to_csv(args.out, index=False)
+
+    if args.json:
+        import json
+
+        print(json.dumps(report, indent=2))
+        return 0
+
+    columns = report["columns"]
+    if not columns:
+        print("(no columns above the saving threshold)")
+    else:
+        print(f"{'Column':<26}{'Current':>12}{'Optimized':>12}{'Saved':>12}{'Pct':>8}")
+        print("-" * 70)
+        for row in columns:
+            print(
+                f"{str(row['column'])[:25]:<26}"
+                f"{str(row['current_dtype'])[:11]:>12}"
+                f"{str(row['optimized_dtype'])[:11]:>12}"
+                f"{_human_bytes(int(row['saved_bytes'])):>12}"
+                f"{float(row['saved_ratio']):>8.1%}"
+            )
+        print("-" * 70)
+
+    print(
+        f"{_human_bytes(int(report['current_bytes']))} -> "
+        f"{_human_bytes(int(report['optimized_bytes']))} "
+        f"({_human_bytes(int(report['saved_bytes']))} saved, "
+        f"{float(report['saved_ratio']):.1%})"
+    )
+    for column, reason in report["skipped"].items():
+        print(f"skipped {column}: {reason}")
+    if args.out:
+        print(f"Wrote optimized dataset to {args.out}")
+    return 0
+
+
+def _human_bytes(size: int) -> str:
+    """Format a byte count for the optimize table."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(value) < 1024.0 or unit == "GB":
+            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{value:.1f}GB"
+
+
 def _cmd_describe(args: argparse.Namespace) -> int:
     """Handle the describe subcommand."""
     data = _load(args)
@@ -2226,6 +2300,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_hist(args)
     elif args.command == "cardinality":
         return _cmd_cardinality(args)
+    elif args.command == "optimize":
+        return _cmd_optimize(args)
     elif args.command == "describe":
         return _cmd_describe(args)
     elif args.command == "missing":

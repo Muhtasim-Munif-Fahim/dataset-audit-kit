@@ -4714,7 +4714,9 @@ class DatasetAuditor:
                     elif series.max() <= 4294967295:
                         suggested = 'uint32'
                     else:
-                        suggested = 'int32'
+                        # Wider than uint32 needs the full 64 bits; narrowing
+                        # here would wrap the value around.
+                        suggested = 'int64'
                 else:
                     if series.min() >= -128 and series.max() <= 127:
                         suggested = 'int8'
@@ -4735,3 +4737,114 @@ class DatasetAuditor:
                 }
         return suggestions
 
+
+    @staticmethod
+    def apply_optimal_dtypes(
+        data: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, dict[str, str]]:
+        """Cast columns to the dtypes ``infer_optimal_dtypes`` suggests.
+
+        Returns the converted frame alongside a mapping of column name to the
+        reason its cast was skipped, so callers can tell a genuine no-op from
+        a silently dropped conversion.
+
+        Integer targets are widened to their pandas nullable equivalent when
+        the column holds nulls -- ``astype('int32')`` raises on NaN, and
+        silently leaving those columns unconverted would understate the
+        saving that ``memory_optimization_report`` promises. Any cast that
+        still fails is recorded and the original column kept, so an
+        unconvertible column never costs the caller the rest of the frame.
+        """
+        suggestions = DatasetAuditor.infer_optimal_dtypes(data)
+        converted = data.copy()
+        skipped: dict[str, str] = {}
+        for column, suggestion in suggestions.items():
+            target = suggestion["suggested_dtype"]
+            series = data[column]
+            if target != "category" and series.isna().any():
+                if target.startswith("int") or target.startswith("uint"):
+                    target = target.capitalize() if target.startswith("int") else "UInt" + target[4:]
+            try:
+                cast = series.astype(target)
+            except (TypeError, ValueError, OverflowError) as exc:
+                skipped[column] = f"{type(exc).__name__}: {exc}"
+                continue
+            # An integer narrowing must be exact: numpy wraps silently rather
+            # than raising, so a value too wide for the target would come back
+            # as a different number. Round-tripping catches that. Float
+            # narrowing is deliberately exempt -- losing precision is the
+            # point of float32, and an exact check would reject every one.
+            if target.lower().startswith(("int", "uint")) and not cast.astype(series.dtype).equals(series):
+                skipped[column] = f"lossy cast to {target} would not round-trip"
+                continue
+            converted[column] = cast
+        return converted, skipped
+
+    @staticmethod
+    def memory_optimization_report(
+        data: pd.DataFrame,
+        *,
+        min_saved_bytes: int = 0,
+    ) -> dict[str, object]:
+        """Measure what ``infer_optimal_dtypes`` would actually save.
+
+        ``infer_optimal_dtypes`` names a better dtype for each column but says
+        nothing about the payoff, which is the number that decides whether a
+        conversion is worth doing. This runs the casts, measures deep memory
+        usage per column before and after, and reports the difference.
+
+        The returned mapping carries ``columns`` (per-column rows sorted by
+        bytes saved, descending), ``current_bytes``, ``optimized_bytes``,
+        ``saved_bytes`` and ``saved_ratio`` for the whole frame, plus
+        ``skipped`` for columns whose cast failed. Frame totals always cover
+        every column, so they stay accurate no matter how ``min_saved_bytes``
+        filters the per-column rows.
+
+        Parameters
+        ----------
+        min_saved_bytes:
+            Omit per-column rows saving fewer bytes than this. Must be a
+            non-negative integer.
+        """
+        if (
+            not isinstance(min_saved_bytes, int)
+            or isinstance(min_saved_bytes, bool)
+            or min_saved_bytes < 0
+        ):
+            raise ValueError("min_saved_bytes must be a non-negative integer")
+
+        converted, skipped = DatasetAuditor.apply_optimal_dtypes(data)
+        before = data.memory_usage(deep=True, index=False)
+        after = converted.memory_usage(deep=True, index=False)
+
+        rows: list[dict[str, object]] = []
+        for column in data.columns:
+            current = int(before[column])
+            optimized = int(after[column])
+            saved = current - optimized
+            if saved < min_saved_bytes:
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "current_dtype": str(data[column].dtype),
+                    "optimized_dtype": str(converted[column].dtype),
+                    "current_bytes": current,
+                    "optimized_bytes": optimized,
+                    "saved_bytes": saved,
+                    "saved_ratio": round(saved / current, 4) if current else 0.0,
+                }
+            )
+        rows.sort(key=lambda row: (-int(row["saved_bytes"]), str(row["column"])))
+
+        current_total = int(before.sum())
+        optimized_total = int(after.sum())
+        saved_total = current_total - optimized_total
+        return {
+            "columns": rows,
+            "current_bytes": current_total,
+            "optimized_bytes": optimized_total,
+            "saved_bytes": saved_total,
+            "saved_ratio": round(saved_total / current_total, 4) if current_total else 0.0,
+            "skipped": skipped,
+        }
