@@ -588,6 +588,26 @@ def build_parser() -> argparse.ArgumentParser:
     describe_parser.add_argument("data", help="Path to the dataset")
     describe_parser.add_argument("--include", choices=["numeric", "categorical", "all"], default="all", help="Which columns to describe (default: all)")
 
+    cardinality_parser = subparsers.add_parser(
+        "cardinality",
+        help="Classify columns by distinct-value count to guide encoding choices",
+    )
+    cardinality_parser.add_argument("data", help="Path to the dataset")
+    cardinality_parser.add_argument("--top", type=int, default=20, help="Maximum columns to show (default: 20)")
+    cardinality_parser.add_argument(
+        "--min-unique-ratio",
+        type=float,
+        default=0.0,
+        help="Only show columns whose unique ratio is at least this value (default: 0.0)",
+    )
+    cardinality_parser.add_argument(
+        "--include",
+        action="append",
+        choices=["constant", "binary", "identifier", "low", "medium", "high"],
+        help="Only show these cardinality labels (repeatable)",
+    )
+    cardinality_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
+
     hist_parser = subparsers.add_parser("hist", help="Show ASCII histogram for a numeric column")
     hist_parser.add_argument("data", help="Path to the dataset")
     hist_parser.add_argument("--column", required=True, help="Numeric column name")
@@ -2054,6 +2074,52 @@ def _cmd_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cardinality(args: argparse.Namespace) -> int:
+    """Handle the cardinality subcommand."""
+    if args.top <= 0:
+        print("--top must be a positive integer")
+        return 1
+    if not 0.0 <= args.min_unique_ratio <= 1.0:
+        print("--min-unique-ratio must be between 0 and 1")
+        return 1
+
+    data = _load(args)
+    report = DatasetAuditor().audit_dataframe(data)
+    rows = report.cardinality_report(
+        top=args.top,
+        min_unique_ratio=args.min_unique_ratio,
+        include=tuple(args.include) if args.include else None,
+    )
+
+    if args.json:
+        import json
+
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        print("(no columns matched)")
+        return 0
+
+    print(f"{'Column':<30}{'Cardinality':>13}{'Unique':>9}{'Ratio':>9}{'Dtype':>13}")
+    print("-" * 74)
+    for row in rows:
+        print(
+            f"{str(row['column'])[:29]:<30}"
+            f"{str(row['cardinality']):>13}"
+            f"{int(row['unique']):>9}"
+            f"{float(row['unique_ratio']):>9.2%}"
+            f"{str(row['dtype']):>13}"
+        )
+    print("-" * 74)
+
+    # The two labels that should usually leave the feature set before modeling.
+    droppable = [r["column"] for r in rows if r["cardinality"] in {"constant", "identifier"}]
+    if droppable:
+        print(f"{len(droppable)} column(s) are constant or identifier-like: {', '.join(map(str, droppable))}")
+    return 0
+
+
 def _cmd_describe(args: argparse.Namespace) -> int:
     """Handle the describe subcommand."""
     data = _load(args)
@@ -2158,6 +2224,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_shape(args)
     elif args.command == "hist":
         return _cmd_hist(args)
+    elif args.command == "cardinality":
+        return _cmd_cardinality(args)
     elif args.command == "describe":
         return _cmd_describe(args)
     elif args.command == "missing":

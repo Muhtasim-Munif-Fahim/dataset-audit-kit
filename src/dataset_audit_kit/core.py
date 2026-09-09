@@ -1702,6 +1702,99 @@ class AuditReport:
         rows.sort(key=lambda row: (-float(row["missing_ratio"]), str(row["column"])))
         return rows[:top]
 
+    def cardinality_report(
+        self,
+        *,
+        top: int = 20,
+        min_unique_ratio: float = 0.0,
+        include: tuple[str, ...] | None = None,
+    ) -> list[dict[str, object]]:
+        """Classify columns by distinct-value count to guide encoding choices.
+
+        Reads ``unique``, ``count`` and ``missing`` from the column profiles
+        and derives ``unique_ratio`` — distinct values over non-null values —
+        then assigns each column a ``cardinality`` label:
+
+        ``constant``
+            One distinct value (or none). Carries no signal and can be dropped.
+        ``binary``
+            Exactly two distinct values.
+        ``identifier``
+            Every non-null value is distinct. Usually a key, not a feature.
+        ``low`` / ``medium`` / ``high``
+            Otherwise, bucketed at ``unique_ratio`` of 0.05 and 0.5.
+
+        The labels are what make this useful ahead of modeling: ``identifier``
+        and ``constant`` columns should leave the feature set, while ``high``
+        categoricals are the ones that make one-hot encoding explode. Columns
+        with no profile entry are skipped. Results are sorted by descending
+        ``unique_ratio`` then alphabetically by column for stable output.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive integer).
+        min_unique_ratio:
+            Only include columns whose unique ratio is at least this value
+            (0.0-1.0).
+        include:
+            Restrict the result to these cardinality labels. ``None`` (the
+            default) keeps every label; an empty tuple raises ``ValueError``.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(min_unique_ratio, (int, float))
+            or isinstance(min_unique_ratio, bool)
+            or not 0.0 <= float(min_unique_ratio) <= 1.0
+        ):
+            raise ValueError("min_unique_ratio must be a number between 0 and 1")
+        labels = {"constant", "binary", "identifier", "low", "medium", "high"}
+        if include is not None:
+            if not include:
+                raise ValueError("include must name at least one cardinality label")
+            unknown = sorted(set(include) - labels)
+            if unknown:
+                raise ValueError(f"unknown cardinality label(s): {', '.join(unknown)}")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            unique = int(profile.get("unique", 0))
+            total = int(profile.get("count", self.rows))
+            non_null = total - int(profile.get("missing", 0))
+            # An all-null column has no non-null values to divide by; treat it
+            # as constant rather than letting the ratio blow up.
+            ratio = float(unique / non_null) if non_null > 0 else 0.0
+            if unique <= 1:
+                label = "constant"
+            elif non_null > 0 and unique == non_null:
+                label = "identifier"
+            elif unique == 2:
+                label = "binary"
+            elif ratio >= 0.5:
+                label = "high"
+            elif ratio >= 0.05:
+                label = "medium"
+            else:
+                label = "low"
+            if include is not None and label not in include:
+                continue
+            if ratio < float(min_unique_ratio):
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "cardinality": label,
+                    "unique": unique,
+                    "unique_ratio": round(ratio, 4),
+                    "non_null": non_null,
+                    "total_rows": total,
+                    "dtype": str(profile.get("dtype", "other")),
+                }
+            )
+        rows.sort(key=lambda row: (-float(row["unique_ratio"]), str(row["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
