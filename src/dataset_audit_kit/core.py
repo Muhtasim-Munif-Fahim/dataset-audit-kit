@@ -864,7 +864,8 @@ class AuditReport:
     rows: int
     columns: int
     duplicate_rows: int
-    missing_cells: int
+    duplicate_groups: list[dict[str, object]] = field(default_factory=list)
+    missing_cells: int = 0
     missingness: dict[str, float] = field(default_factory=dict)
     label_distribution: dict[str, int] = field(default_factory=dict)
     drift_scores: dict[str, float] = field(default_factory=dict)
@@ -1795,6 +1796,37 @@ class AuditReport:
         rows.sort(key=lambda row: (-float(row["unique_ratio"]), str(row["column"])))
         return rows[:top]
 
+    def row_duplicates_report(
+        self,
+        *,
+        top: int = 20,
+    ) -> list[dict[str, object]]:
+        """Return the duplicate-row groups captured during the audit pass.
+
+        Each entry represents a set of rows that share identical values
+        across every column. The list is sorted by descending group size so
+        the largest duplicate clusters appear first. ``indices`` holds the
+        original row labels; ``count`` is the number of rows in that group.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of duplicate groups to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        groups = [
+            {
+                "indices": [int(i) for i in group["indices"]],
+                "count": int(group["count"]),
+                "columns": list(group["columns"]),
+            }
+            for group in self.duplicate_groups
+        ]
+        groups.sort(key=lambda g: -int(g["count"]))
+        return groups[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
@@ -2637,6 +2669,22 @@ class DatasetAuditor:
         progress.advance("duplicates")
         duplicate_rows = int(data.duplicated().sum())
         duplicate_ratio = duplicate_rows / max(len(data), 1)
+        duplicate_groups: list[dict[str, object]] = []
+        if duplicate_rows:
+            dup_mask = data.duplicated(keep=False)
+            dup_df = data[dup_mask]
+            grouped = dup_df.groupby(list(data.columns), sort=False)
+            for _, group in grouped:
+                if len(group) < 2:
+                    continue
+                duplicate_groups.append(
+                    {
+                        "indices": group.index.tolist(),
+                        "count": len(group),
+                        "columns": list(data.columns),
+                    }
+                )
+            duplicate_groups.sort(key=lambda g: -int(g["count"]))
         if duplicate_rows and duplicate_ratio > self.max_duplicate_ratio:
             issues.append(
                 AuditIssue(
@@ -2722,6 +2770,7 @@ class DatasetAuditor:
             rows=int(len(data)),
             columns=column_count,
             duplicate_rows=duplicate_rows,
+            duplicate_groups=duplicate_groups,
             missing_cells=missing_cells,
             missingness=missingness,
             column_profiles=column_profiles,
