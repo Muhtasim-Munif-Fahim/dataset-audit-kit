@@ -1868,6 +1868,49 @@ class AuditReport:
         rows.sort(key=lambda r: (-int(r["column_count"]), str(r["dtype"])))
         return rows[:top]
 
+    def data_quality_checklist(self) -> list[dict[str, object]]:
+        """Return a pass/fail checklist of quality checks run during the audit.
+
+        Each item represents a quality-check category. Checks that
+        produced at least one error or warning are marked ``fail``;
+        all others (passing or not run) are marked ``pass``.
+        ``issues`` reports how many findings fall into each category.
+        Core checks are always listed; additional categories appear
+        when they have findings. Results are sorted alphabetically
+        by check name.
+        """
+        issue_counts: dict[str, int] = {}
+        failing: set[str] = set()
+        for issue in self.issues:
+            issue_counts[issue.check] = issue_counts.get(issue.check, 0) + 1
+            if issue.severity in {"error", "warning"}:
+                failing.add(issue.check)
+
+        core_checks = (
+            "schema",
+            "rows",
+            "columns",
+            "missing_cells",
+            "duplicates",
+            "missingness",
+            "column_names",
+            "uniqueness",
+            "composite_uniqueness",
+            "labels",
+        )
+
+        rows: list[dict[str, object]] = []
+        all_checks = set(core_checks) | set(issue_counts.keys())
+        for check in sorted(all_checks):
+            rows.append(
+                {
+                    "check": check,
+                    "status": "fail" if check in failing else "pass",
+                    "issues": int(issue_counts.get(check, 0)),
+                }
+            )
+        return rows
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
