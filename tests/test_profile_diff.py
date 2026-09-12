@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import textwrap
 
-import pandas as pd
 import pytest
 
 from dataset_audit_kit.cli import main

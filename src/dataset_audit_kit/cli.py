@@ -608,6 +608,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cardinality_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
 
+    dtype_summary_parser = subparsers.add_parser(
+        "dtype-summary",
+        help="Group columns by their inferred dtype",
+    )
+    dtype_summary_parser.add_argument("data", help="Path to the dataset")
+    dtype_summary_parser.add_argument("--top", type=int, default=20, help="Maximum dtype groups to show (default: 20)")
+    dtype_summary_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
+
     optimize_parser = subparsers.add_parser(
         "optimize",
         help="Report memory saved by narrowing column dtypes, and optionally write the result",
@@ -1676,7 +1684,6 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
 
     import json
     import re
-    from datetime import datetime
 
     try:
         rules = ValidationRules.from_json(args.rules_file, profile=args.profile)
@@ -2134,6 +2141,35 @@ def _cmd_cardinality(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dtype_summary(args: argparse.Namespace) -> int:
+    """Handle the dtype-summary subcommand."""
+    if args.top <= 0:
+        print("--top must be a positive integer")
+        return 1
+
+    data = _load(args)
+    report = DatasetAuditor().audit_dataframe(data)
+    rows = report.dtype_summary(top=args.top)
+
+    if args.json:
+        import json
+
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        print("(no columns found)")
+        return 0
+
+    print(f"{'Dtype':<20}{'Count':>8}{'Columns'}")
+    print("-" * 80)
+    for row in rows:
+        cols = ", ".join(str(c) for c in row["columns"])
+        print(f"{str(row['dtype']):<20}{int(row['column_count']):>8}{cols}")
+    print("-" * 80)
+    return 0
+
+
 def _cmd_optimize(args: argparse.Namespace) -> int:
     """Handle the optimize subcommand."""
     if args.min_saved_bytes < 0:
@@ -2300,6 +2336,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_hist(args)
     elif args.command == "cardinality":
         return _cmd_cardinality(args)
+    elif args.command == "dtype-summary":
+        return _cmd_dtype_summary(args)
     elif args.command == "optimize":
         return _cmd_optimize(args)
     elif args.command == "describe":

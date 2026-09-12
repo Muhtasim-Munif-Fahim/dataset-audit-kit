@@ -1827,6 +1827,47 @@ class AuditReport:
         groups.sort(key=lambda g: -int(g["count"]))
         return groups[:top]
 
+    def dtype_summary(
+        self,
+        *,
+        top: int = 20,
+    ) -> list[dict[str, object]]:
+        """Group columns by their inferred dtype.
+
+        Reads ``dtype`` from each column profile and clusters columns
+        into buckets (``numeric``, ``categorical``, ``datetime``,
+        ``other``). Useful for a quick sanity check before feature
+        engineering: how many columns fall into each type, and which
+        names carry it. Results are sorted by descending column count
+        then alphabetically by dtype label.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of dtype groups to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        groups: dict[str, list[str]] = {}
+        for column, profile in self.column_profiles.items():
+            dtype = str(profile.get("dtype", "other"))
+            groups.setdefault(dtype, []).append(column)
+
+        rows: list[dict[str, object]] = []
+        for dtype, columns in groups.items():
+            columns.sort()
+            rows.append(
+                {
+                    "dtype": dtype,
+                    "column_count": len(columns),
+                    "columns": columns,
+                }
+            )
+        rows.sort(key=lambda r: (-int(r["column_count"]), str(r["dtype"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
