@@ -1982,6 +1982,39 @@ class AuditReport:
         rows.sort(key=lambda r: (-float(r["missing_ratio"]), str(r["column"])))
         return rows[:top]
 
+    def zero_variance_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Report columns where all non-null values are identical.
+
+        A column with at most one distinct non-null value carries no
+        information for modeling — it is constant or empty. The report
+        surfaces each such column along with its single value (when
+        available) and the count of non-null rows.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            unique = int(profile.get("unique", 0))
+            if unique <= 1:
+                rows.append(
+                    {
+                        "column": column,
+                        "unique": unique,
+                        "top_value": profile.get("top", None),
+                        "non_null": int(profile.get("count", 0))
+                        - int(profile.get("missing", 0)),
+                    }
+                )
+        rows.sort(key=lambda r: str(r["column"]))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
