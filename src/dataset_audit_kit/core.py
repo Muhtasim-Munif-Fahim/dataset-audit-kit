@@ -2259,6 +2259,50 @@ class AuditReport:
         )
         return rows[:top]
 
+    def low_cardinality_report(self, *, top: int = 20, max_ratio: float = 0.05) -> list[dict[str, object]]:
+        """Report columns whose unique-value ratio is below ``max_ratio``.
+
+        Companion to ``high_cardinality_report``: surfaces the columns
+        most likely to benefit from grouping, encoding, or feature
+        engineering. Columns are sorted by descending unique ratio so
+        the boundary cases appear first.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        max_ratio:
+            Maximum unique ratio (0.0–1.0) for a column to be
+            included.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(max_ratio, (int, float))
+            or isinstance(max_ratio, bool)
+            or not 0.0 <= float(max_ratio) <= 1.0
+        ):
+            raise ValueError("max_ratio must be a number between 0 and 1")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            unique = int(profile.get("unique", 0))
+            total = int(profile.get("count", self.rows))
+            non_null = total - int(profile.get("missing", 0))
+            ratio = unique / non_null if non_null > 0 else 0.0
+            if ratio <= float(max_ratio):
+                rows.append(
+                    {
+                        "column": column,
+                        "unique": unique,
+                        "unique_ratio": round(ratio, 4),
+                        "dtype": str(profile.get("dtype", "other")),
+                    }
+                )
+        rows.sort(key=lambda r: (-float(r["unique_ratio"]), str(r["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
