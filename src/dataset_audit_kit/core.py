@@ -2015,6 +2015,50 @@ class AuditReport:
         rows.sort(key=lambda r: str(r["column"]))
         return rows[:top]
 
+    def numeric_stats_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Summarize statistic-bearing numeric columns.
+
+        For each numeric column the report surfaces min, max, mean,
+        median, std, quartiles, skewness, kurtosis, and IQR-outlier
+        count. Columns whose profile lacks numeric fields are skipped.
+        Results are sorted by descending absolute skewness, surfacing
+        the most asymmetric distributions first.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            if str(profile.get("dtype", "other")) != "numeric":
+                continue
+            if "mean" not in profile:
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "min": profile.get("min"),
+                    "max": profile.get("max"),
+                    "mean": profile.get("mean"),
+                    "median": profile.get("median", profile.get("q50")),
+                    "std": profile.get("std"),
+                    "q25": profile.get("q25"),
+                    "q50": profile.get("q50"),
+                    "q75": profile.get("q75"),
+                    "skewness": profile.get("skewness"),
+                    "kurtosis": profile.get("kurtosis"),
+                    "outliers_iqr": profile.get("outliers_iqr", 0),
+                    "outlier_ratio": profile.get("outlier_ratio", 0.0),
+                }
+            )
+        rows.sort(key=lambda r: abs(float(r.get("skewness") or 0.0)), reverse=True)
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
