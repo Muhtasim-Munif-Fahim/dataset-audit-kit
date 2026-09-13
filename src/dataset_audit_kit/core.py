@@ -2143,6 +2143,54 @@ class AuditReport:
         rows.sort(key=lambda r: (-float(r["unique_ratio"]), str(r["column"])))
         return rows[:top]
 
+    def outlier_detail_report(self, *, top: int = 20, min_ratio: float = 0.0) -> list[dict[str, object]]:
+        """Report numeric columns with IQR-flagged outliers.
+
+        Each row carries the outlier count, ratio, and the IQR fence
+        bounds (lower / upper) so the caller can decide whether to
+        clip, cap, or transform. Columns are sorted by descending
+        outlier ratio.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        min_ratio:
+            Minimum outlier ratio (0.0–1.0) required to include a
+            column.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            if str(profile.get("dtype", "other")) != "numeric":
+                continue
+            ratio = profile.get("outlier_ratio")
+            count = profile.get("outliers_iqr")
+            if ratio is None or count is None:
+                continue
+            ratio_f = float(ratio)
+            if ratio_f < float(min_ratio):
+                continue
+            q1 = profile.get("q25")
+            q3 = profile.get("q75")
+            iqr = float(q3) - float(q1) if q1 is not None and q3 is not None else None
+            rows.append(
+                {
+                    "column": column,
+                    "outliers": int(count),
+                    "outlier_ratio": ratio_f,
+                    "lower_fence": float(q1) - 1.5 * iqr if iqr is not None else None,
+                    "upper_fence": float(q3) + 1.5 * iqr if iqr is not None else None,
+                    "q1": q1,
+                    "q3": q3,
+                }
+            )
+        rows.sort(key=lambda r: (-float(r["outlier_ratio"]), str(r["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
