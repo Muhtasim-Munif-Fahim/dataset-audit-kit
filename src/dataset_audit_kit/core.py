@@ -1944,6 +1944,44 @@ class AuditReport:
         rows.sort(key=lambda r: str(r["column"]))
         return rows[:top]
 
+    def high_missing_report(self, *, top: int = 20, threshold: float = 0.1) -> list[dict[str, object]]:
+        """Report columns whose missing-value ratio exceeds a threshold.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        threshold:
+            Minimum missing ratio (0.0–1.0) for a column to be
+            included.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(threshold, (int, float))
+            or isinstance(threshold, bool)
+            or not 0.0 <= float(threshold) <= 1.0
+        ):
+            raise ValueError("threshold must be a number between 0 and 1")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            missing = int(profile.get("missing", 0))
+            count = int(profile.get("count", self.rows))
+            ratio = missing / count if count > 0 else 0.0
+            if ratio >= float(threshold):
+                rows.append(
+                    {
+                        "column": column,
+                        "missing": missing,
+                        "missing_ratio": round(ratio, 4),
+                        "dtype": str(profile.get("dtype", "other")),
+                    }
+                )
+        rows.sort(key=lambda r: (-float(r["missing_ratio"]), str(r["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
