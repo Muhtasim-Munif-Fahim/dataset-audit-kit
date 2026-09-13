@@ -2191,6 +2191,39 @@ class AuditReport:
         rows.sort(key=lambda r: (-float(r["outlier_ratio"]), str(r["column"])))
         return rows[:top]
 
+    def drift_summary_report(self, *, top: int = 20, min_score: float = 0.0) -> list[dict[str, object]]:
+        """Summarize drift scores by column.
+
+        Reads the drift dictionary recorded during the audit pass and
+        returns one row per column whose drift score meets
+        ``min_score``. Results are sorted by descending drift score so
+        the most-shifted columns appear first.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        min_score:
+            Minimum drift score (0.0–1.0) required to include a column.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, score in self.drift_scores.items():
+            score_f = float(score)
+            if score_f < float(min_score):
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "drift_score": round(score_f, 4),
+                }
+            )
+        rows.sort(key=lambda r: (-float(r["drift_score"]), str(r["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
