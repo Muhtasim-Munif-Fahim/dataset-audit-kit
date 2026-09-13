@@ -1911,6 +1911,39 @@ class AuditReport:
             )
         return rows
 
+    def empty_columns_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Report columns where every value is null.
+
+        Iterates the column profiles and returns those whose missing
+        count equals their total row count — the columns that carry
+        zero signal and can usually be dropped without loss. Results
+        are sorted alphabetically by column name.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            missing = int(profile.get("missing", 0))
+            count = int(profile.get("count", self.rows))
+            if missing == count:
+                rows.append(
+                    {
+                        "column": column,
+                        "missing": missing,
+                        "total_rows": count,
+                        "missing_ratio": 1.0,
+                    }
+                )
+        rows.sort(key=lambda r: str(r["column"]))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
