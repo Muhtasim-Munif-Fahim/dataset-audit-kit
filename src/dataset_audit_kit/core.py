@@ -2224,6 +2224,41 @@ class AuditReport:
         rows.sort(key=lambda r: (-float(r["drift_score"]), str(r["column"])))
         return rows[:top]
 
+    def column_entropy_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Report categorical columns ranked by entropy.
+
+        Normalized entropy (0–1) measures how unpredictable or noisy a
+        column's value distribution is — 0 is perfectly imbalanced
+        (one dominant value), 1 is uniform. Columns are sorted by
+        descending normalized entropy.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            if "normalized_entropy" not in profile:
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "entropy": profile.get("entropy"),
+                    "normalized_entropy": profile.get("normalized_entropy"),
+                    "unique": int(profile.get("unique", 0)),
+                    "dtype": str(profile.get("dtype", "other")),
+                }
+            )
+        rows.sort(
+            key=lambda r: (-float(r.get("normalized_entropy") or 0.0), str(r["column"]))
+        )
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
