@@ -2059,6 +2059,47 @@ class AuditReport:
         rows.sort(key=lambda r: abs(float(r.get("skewness") or 0.0)), reverse=True)
         return rows[:top]
 
+    def categorical_stats_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Summarize categorical (incl. datetime) columns.
+
+        For each non-numeric column the report surfaces unique count,
+        entropy, normalized entropy, and the most frequent value with
+        its count. Results are sorted by descending normalized entropy,
+        surfacing the columns with the most uniform category
+        distribution first.
+
+        Parameters
+        ----------
+        top:
+            Maximum number of columns to return (must be a positive
+            integer).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            if str(profile.get("dtype", "other")) == "numeric":
+                continue
+            if "unique" not in profile:
+                continue
+            rows.append(
+                {
+                    "column": column,
+                    "unique": int(profile.get("unique", 0)),
+                    "entropy": profile.get("entropy"),
+                    "normalized_entropy": profile.get("normalized_entropy"),
+                    "top_value": profile.get("top"),
+                    "top_freq": profile.get("freq"),
+                    "dtype": str(profile.get("dtype", "other")),
+                }
+            )
+        rows.sort(
+            key=lambda r: float(r.get("normalized_entropy") or 0.0),
+            reverse=True,
+        )
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
