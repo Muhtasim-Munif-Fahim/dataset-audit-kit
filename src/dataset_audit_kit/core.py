@@ -1911,6 +1911,34 @@ class AuditReport:
             )
         return rows
 
+    def issue_priority_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Group audit findings into a remediation-first work queue.
+
+        Repeated findings for one check and column are collapsed, preserving
+        the highest severity and the first actionable message.  This makes a
+        wide audit practical to triage without hiding how many records were
+        affected by the same root cause.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        ranks = {"error": 0, "warning": 1, "info": 2}
+        grouped: dict[tuple[str, str | None], list[AuditIssue]] = {}
+        for issue in self.issues:
+            grouped.setdefault((issue.check, issue.column), []).append(issue)
+        rows: list[dict[str, object]] = []
+        for (check, column), issues in grouped.items():
+            issues.sort(key=lambda item: ranks.get(item.severity, 3))
+            first = issues[0]
+            rows.append({
+                "check": check,
+                "column": column,
+                "severity": first.severity,
+                "count": len(issues),
+                "message": first.message,
+            })
+        rows.sort(key=lambda row: (ranks.get(str(row["severity"]), 3), -int(row["count"]), str(row["check"]), str(row["column"])))
+        return rows[:top]
+
     def empty_columns_report(self, *, top: int = 20) -> list[dict[str, object]]:
         """Report columns where every value is null.
 
