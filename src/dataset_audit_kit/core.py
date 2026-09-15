@@ -2303,6 +2303,34 @@ class AuditReport:
         rows.sort(key=lambda r: (-float(r["unique_ratio"]), str(r["column"])))
         return rows[:top]
 
+    def constant_columns_report(self, *, top: int = 20) -> list[dict[str, object]]:
+        """Return non-empty columns with a single observed value.
+
+        Constant columns add no within-dataset predictive information and
+        often indicate an accidental export or a feature that can be removed
+        before modelling.  Fully-missing columns are excluded because they
+        are reported separately by :meth:`empty_columns_report`.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+
+        rows: list[dict[str, object]] = []
+        for column, profile in self.column_profiles.items():
+            total = int(profile.get("count", self.rows))
+            missing = int(profile.get("missing", 0))
+            non_null = total - missing
+            if non_null > 0 and int(profile.get("unique", 0)) == 1:
+                rows.append(
+                    {
+                        "column": column,
+                        "non_null": non_null,
+                        "missing": missing,
+                        "dtype": str(profile.get("dtype", "other")),
+                    }
+                )
+        rows.sort(key=lambda r: (str(r["column"])))
+        return rows[:top]
+
     def column_overlap_summary(
         self,
         other: "AuditReport",
