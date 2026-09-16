@@ -29,6 +29,15 @@ DEFAULT_RISK_WEIGHT = 10.0
 #: Default fraction of null-pattern values allowed before warning.
 DEFAULT_NULL_PATTERN_THRESHOLD = 0.05
 
+#: Methods accepted by the opt-in numeric outlier check.
+OUTLIER_METHODS = frozenset({"iqr", "zscore"})
+
+#: Tukey fence multiplier used when ``outlier_method="iqr"`` and no threshold is set.
+DEFAULT_IQR_FENCE = 1.5
+
+#: Population z-score cutoff used when ``outlier_method="zscore"`` and no threshold is set.
+DEFAULT_ZSCORE_THRESHOLD = 3.0
+
 #: Fraction of its weight a warning contributes, relative to an error.
 RISK_WARNING_FACTOR = 0.5
 
@@ -92,6 +101,7 @@ _AUDIT_PHASES = (
     "whitespace",
     "null_patterns",
     "sensitive",
+    "outliers",
     "profiles",
     "category_share",
     "redundancy",
@@ -1134,6 +1144,11 @@ class AuditReport:
                         f"Std: {_format_stat(profile.get('std'))}"
                     )
                     lines.append(f"- Quartiles: Q1={profile.get('q25', '?')} Q2={profile.get('q50', '?')} Q3={profile.get('q75', '?')}")
+                    if profile.get("outliers_iqr") is not None:
+                        lines.append(
+                            f"- IQR outliers: {profile.get('outliers_iqr', 0)} "
+                            f"({float(profile.get('outlier_ratio') or 0.0):.1%})"
+                        )
                 elif dtype == "datetime":
                     lines.append(f"- Range: {profile.get('min', '?')} - {profile.get('max', '?')}")
                     lines.append(f"- Mean: {profile.get('mean', '?')}")
@@ -1167,6 +1182,23 @@ class AuditReport:
             lines.extend(["", "## Drift scores"])
             for column, score in self.drift_scores.items():
                 lines.append(f"- `{column}`: {score:.3f}")
+
+        outlier_rows = [
+            row
+            for row in self.outlier_detail_report(
+                top=max(len(self.column_profiles), 1), min_ratio=0.0
+            )
+            if int(row.get("outliers") or 0) > 0
+        ]
+        if outlier_rows:
+            lines.extend(["", "## Outliers"])
+            for row in outlier_rows:
+                lines.append(
+                    f"- `{row['column']}`: {row['outliers']} IQR outlier(s) "
+                    f"({float(row['outlier_ratio']):.1%} of values); "
+                    f"fences [{_format_stat(row['lower_fence'])}, "
+                    f"{_format_stat(row['upper_fence'])}]"
+                )
 
         if self.issues:
             lines.extend(["", "## Issues"])
@@ -1347,6 +1379,8 @@ class AuditReport:
                         f"<tr><td>Q1</td><td>{esc(_format_stat(profile.get('q25')))}</td></tr>",
                         f"<tr><td>Q2 (median)</td><td>{esc(_format_stat(profile.get('q50')))}</td></tr>",
                         f"<tr><td>Q3</td><td>{esc(_format_stat(profile.get('q75')))}</td></tr>",
+                        f"<tr><td>IQR outliers</td><td>{esc(profile.get('outliers_iqr', 0))} "
+                        f"({float(profile.get('outlier_ratio') or 0.0):.1%})</td></tr>",
                     ])
                 elif dtype == "datetime":
                     profile_sections.extend([
@@ -1375,6 +1409,31 @@ class AuditReport:
                 "<h2>Drift scores</h2>",
                 "<table><thead><tr><th>Column</th><th>Score</th></tr></thead><tbody>",
                 *drift_rows,
+                "</tbody></table>",
+            ])
+
+        outlier_html_rows: list[str] = []
+        for row in self.outlier_detail_report(
+            top=max(len(self.column_profiles), 1), min_ratio=0.0
+        ):
+            if int(row.get("outliers") or 0) <= 0:
+                continue
+            outlier_html_rows.append(
+                "<tr>"
+                f"<td>{esc(row['column'])}</td>"
+                f"<td>{esc(row['outliers'])}</td>"
+                f"<td>{float(row['outlier_ratio']):.1%}</td>"
+                f"<td>{esc(_format_stat(row['lower_fence']))}</td>"
+                f"<td>{esc(_format_stat(row['upper_fence']))}</td>"
+                "</tr>"
+            )
+        if outlier_html_rows:
+            sections.extend([
+                "<h2>Outliers</h2>",
+                "<table><thead><tr><th>Column</th><th>IQR outliers</th>"
+                "<th>Ratio</th><th>Lower fence</th><th>Upper fence</th>"
+                "</tr></thead><tbody>",
+                *outlier_html_rows,
                 "</tbody></table>",
             ])
 
@@ -1490,6 +1549,17 @@ class AuditReport:
                 suggestion["action"] = "deduplicate_column"
                 suggestion["code"] = f"df = df.drop_duplicates(subset=['{col}'])"
                 suggestion["description"] = f"Remove rows with duplicate values in '{col}'."
+            elif issue.check == "outliers":
+                col = issue.column or ""
+                suggestion["action"] = "winsorize"
+                suggestion["code"] = (
+                    f"q1, q3 = df['{col}'].quantile(0.25), df['{col}'].quantile(0.75)\n"
+                    f"iqr = q3 - q1\n"
+                    f"df['{col}'] = df['{col}'].clip(lower=q1 - 1.5 * iqr, upper=q3 + 1.5 * iqr)"
+                )
+                suggestion["description"] = (
+                    f"Clip extreme values in '{col}' to the IQR fences, or investigate them."
+                )
             else:
                 suggestion["action"] = "manual_review"
                 suggestion["code"] = "# No automated fix available"
@@ -2970,6 +3040,10 @@ class DatasetAuditor:
         missing_cooccurrence_min_count: int = 1,
         missing_cooccurrence_top: int | None = 10,
         ks_alpha: float = 0.05,
+        outlier_check: bool = False,
+        outlier_method: str = "iqr",
+        outlier_threshold: float | None = None,
+        outlier_max_ratio: float = 0.0,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -3016,6 +3090,21 @@ class DatasetAuditor:
                 raise ValueError(f"{name} must be a non-negative integer or None")
         if min_rows is not None and max_rows is not None and min_rows > max_rows:
             raise ValueError("min_rows must not exceed max_rows")
+        if not isinstance(outlier_method, str) or outlier_method not in OUTLIER_METHODS:
+            raise ValueError("outlier_method must be 'iqr' or 'zscore'")
+        if outlier_threshold is not None and (
+            isinstance(outlier_threshold, bool)
+            or not isinstance(outlier_threshold, (int, float))
+            or not math.isfinite(float(outlier_threshold))
+            or float(outlier_threshold) <= 0.0
+        ):
+            raise ValueError("outlier_threshold must be a positive finite number")
+        if (
+            isinstance(outlier_max_ratio, bool)
+            or not isinstance(outlier_max_ratio, (int, float))
+            or not 0.0 <= float(outlier_max_ratio) <= 1.0
+        ):
+            raise ValueError("outlier_max_ratio must be a fraction between 0 and 1")
         validated_weights: dict[str, float] = {}
         for check, weight in (severity_weights or {}).items():
             if (
@@ -3055,6 +3144,15 @@ class DatasetAuditor:
         self.missing_cooccurrence_min_count = missing_cooccurrence_min_count
         self.missing_cooccurrence_top = missing_cooccurrence_top
         self.ks_alpha = float(ks_alpha)
+        self.outlier_check = bool(outlier_check)
+        self.outlier_method = outlier_method
+        if outlier_threshold is None:
+            self.outlier_threshold = (
+                DEFAULT_IQR_FENCE if outlier_method == "iqr" else DEFAULT_ZSCORE_THRESHOLD
+            )
+        else:
+            self.outlier_threshold = float(outlier_threshold)
+        self.outlier_max_ratio = float(outlier_max_ratio)
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -3250,6 +3348,10 @@ class DatasetAuditor:
         progress.advance("sensitive")
         if self.sensitive_check:
             self._check_sensitive_values(data, issues)
+
+        progress.advance("outliers")
+        if self.outlier_check:
+            self._check_outliers(data, issues)
 
         progress.advance("profiles")
         column_profiles = self._profile_columns(data)
@@ -3843,6 +3945,103 @@ class DatasetAuditor:
                             observed=count,
                         )
                     )
+
+    def _check_outliers(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+    ) -> None:
+        """Flag numeric columns whose extreme-value share exceeds the allowance.
+
+        Opt-in because many real-world columns have a legitimate long tail.
+        Tukey IQR fences (the default) are robust to a few extremes; the
+        z-score method is mean-based and more sensitive. Boolean columns are
+        skipped: 0/1 is not an extreme-value problem. Non-finite values are
+        dropped before the fences are computed.
+        """
+
+        method = self.outlier_method
+        fence = self.outlier_threshold
+        allowed = self.outlier_max_ratio
+
+        for position, column in enumerate(data.columns):
+            col = data.iloc[:, position]
+            if not pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col):
+                continue
+            numeric = pd.to_numeric(col.dropna(), errors="coerce")
+            numeric = numeric[np.isfinite(numeric.astype(float))]
+            if numeric.empty:
+                continue
+
+            lower: float | None = None
+            upper: float | None = None
+            method_label: str
+            if method == "iqr":
+                if len(numeric) < 4:
+                    continue
+                q1 = float(numeric.quantile(0.25))
+                q3 = float(numeric.quantile(0.75))
+                iqr = q3 - q1
+                if iqr <= 0:
+                    continue
+                lower = q1 - fence * iqr
+                upper = q3 + fence * iqr
+                mask = (numeric < lower) | (numeric > upper)
+                method_label = "IQR"
+            else:
+                if len(numeric) < 2:
+                    continue
+                mean = float(numeric.mean())
+                std = float(numeric.std(ddof=0))
+                if std <= 0:
+                    continue
+                z_scores = (numeric - mean) / std
+                mask = z_scores.abs() > fence
+                method_label = "z-score"
+
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            total = len(numeric)
+            ratio = count / total
+            if ratio <= allowed:
+                continue
+
+            flagged = numeric[mask]
+            extremes: list[str] = []
+            if lower is not None:
+                lows = flagged[flagged < lower]
+                highs = flagged[flagged > (upper if upper is not None else flagged.max())]
+                if len(lows):
+                    extremes.append(f"min={float(lows.min()):.4g}")
+                if len(highs):
+                    extremes.append(f"max={float(highs.max()):.4g}")
+            else:
+                extremes.append(f"min={float(flagged.min()):.4g}")
+                extremes.append(f"max={float(flagged.max()):.4g}")
+
+            if method == "iqr":
+                detail = (
+                    f"fences [{_format_stat(lower)}, {_format_stat(upper)}], "
+                    f"k={fence:g}"
+                )
+            else:
+                detail = f"|z| > {fence:g}"
+            extreme_note = f"; extreme {', '.join(extremes)}" if extremes else ""
+
+            issues.append(
+                AuditIssue(
+                    check="outliers",
+                    severity="warning",
+                    message=(
+                        f"{count} {method_label} outlier(s) detected "
+                        f"({ratio:.1%} of {total} values; {detail}{extreme_note})."
+                    ),
+                    column=str(column),
+                    observed=count,
+                    threshold=allowed,
+                )
+            )
 
     def _check_category_share(
         self,
