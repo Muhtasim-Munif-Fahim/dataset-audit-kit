@@ -150,6 +150,78 @@ class TestSensitiveFlag:
         assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
 
 
+class TestOutlierFlag:
+    @pytest.fixture
+    def spiked_csv(self, tmp_path):
+        path = tmp_path / "spiked.csv"
+        pd.DataFrame(
+            {"id": list(range(21)), "score": list(range(10, 30)) + [1000]}
+        ).to_csv(path, index=False)
+        return str(path)
+
+    def test_extremes_fail_only_when_enabled(self, spiked_csv, capsys) -> None:
+        assert main(["audit", spiked_csv, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert not [i for i in payload["issues"] if i["check"] == "outliers"]
+
+        assert main(["audit", spiked_csv, "--json", "--check-outliers"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        findings = [i for i in payload["issues"] if i["check"] == "outliers"]
+        assert findings and findings[0]["column"] == "score"
+        assert "IQR outlier" in findings[0]["message"]
+
+    def test_zscore_method_is_wired_through(self, tmp_path, capsys) -> None:
+        path = tmp_path / "z.csv"
+        pd.DataFrame({"score": list(range(99)) + [1000]}).to_csv(path, index=False)
+        assert main(
+            [
+                "audit",
+                str(path),
+                "--json",
+                "--check-outliers",
+                "--outlier-method",
+                "zscore",
+                "--outlier-threshold",
+                "2.0",
+            ]
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        findings = [i for i in payload["issues"] if i["check"] == "outliers"]
+        assert findings and "z-score" in findings[0]["message"]
+
+    def test_check_gate_counts_outlier_findings(self, spiked_csv, capsys) -> None:
+        assert main(["check", spiked_csv]) == 0
+        assert main(["check", spiked_csv, "--check-outliers"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_outlier_flags_are_part_of_the_report_fingerprint(
+        self, spiked_csv, tmp_path
+    ) -> None:
+        first = tmp_path / "first.json"
+        second = tmp_path / "second.json"
+        assert main(["audit", spiked_csv, "--save-json", str(first)]) == 0
+        assert main(
+            ["audit", spiked_csv, "--check-outliers", "--save-json", str(second)]
+        ) == 1
+        baseline = json.loads(first.read_text(encoding="utf-8"))
+        enabled = json.loads(second.read_text(encoding="utf-8"))
+        assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
+
+    def test_invalid_threshold_is_a_usage_error(self, spiked_csv, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(["audit", spiked_csv, "--check-outliers", "--outlier-threshold", "0"])
+        assert exc.value.code == 2
+        assert "positive" in capsys.readouterr().err
+
+    def test_markdown_report_includes_the_outliers_section(
+        self, spiked_csv, capsys
+    ) -> None:
+        assert main(["audit", spiked_csv, "--check-outliers"]) == 1
+        out = capsys.readouterr().out
+        assert "## Outliers" in out
+        assert "`score`" in out
+
+
 class TestMissingCooccurrenceFlag:
     @pytest.fixture
     def gappy_csv(self, tmp_path):

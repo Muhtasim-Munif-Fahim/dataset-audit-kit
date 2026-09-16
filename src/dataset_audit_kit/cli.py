@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 
 import numpy as np
@@ -239,6 +240,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Warn when a categorical column contains values below this share",
     )
+    audit.add_argument(
+        "--check-outliers",
+        action="store_true",
+        help="Flag numeric columns with IQR or z-score extreme values",
+    )
+    audit.add_argument(
+        "--outlier-method",
+        choices=["iqr", "zscore"],
+        default="iqr",
+        help="Outlier rule used with --check-outliers (default: iqr)",
+    )
+    audit.add_argument(
+        "--outlier-threshold",
+        type=_positive_float,
+        default=None,
+        help="IQR multiplier (default: 1.5) or z-score cutoff (default: 3.0)",
+    )
+    audit.add_argument(
+        "--max-outlier-ratio",
+        type=_unit_interval,
+        default=0.0,
+        help="Fraction of outliers allowed per column before warning (default: 0)",
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -446,6 +470,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=_unit_interval,
         default=None,
         help="Warn when a categorical column contains values below this share",
+    )
+    check.add_argument(
+        "--check-outliers",
+        action="store_true",
+        help="Flag numeric columns with IQR or z-score extreme values",
+    )
+    check.add_argument(
+        "--outlier-method",
+        choices=["iqr", "zscore"],
+        default="iqr",
+        help="Outlier rule used with --check-outliers (default: iqr)",
+    )
+    check.add_argument(
+        "--outlier-threshold",
+        type=_positive_float,
+        default=None,
+        help="IQR multiplier (default: 1.5) or z-score cutoff (default: 3.0)",
+    )
+    check.add_argument(
+        "--max-outlier-ratio",
+        type=_unit_interval,
+        default=0.0,
+        help="Fraction of outliers allowed per column before warning (default: 0)",
     )
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
@@ -752,6 +799,15 @@ def _non_negative_float(text: str) -> float:
     return value
 
 
+def _positive_float(text: str) -> float:
+    """Parse an argparse value that must be strictly positive and finite."""
+
+    value = float(text)
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return value
+
+
 def _unit_interval(text: str) -> float:
     """Parse an argparse value that must be a fraction between 0 and 1."""
 
@@ -835,6 +891,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        outlier_check=getattr(args, "check_outliers", False),
+        outlier_method=getattr(args, "outlier_method", "iqr"),
+        outlier_threshold=getattr(args, "outlier_threshold", None),
+        outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -1017,6 +1077,10 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "ks_alpha": args.ks_alpha,
         "max_category_share": getattr(args, "max_category_share", None),
         "rare_category_share": getattr(args, "rare_category_share", None),
+        "outlier_check": getattr(args, "check_outliers", False),
+        "outlier_method": getattr(args, "outlier_method", "iqr"),
+        "outlier_threshold": getattr(args, "outlier_threshold", None),
+        "outlier_max_ratio": getattr(args, "max_outlier_ratio", 0.0),
     }
     if args.rules:
         fingerprint["rules_sha256"] = hashlib.sha256(
@@ -1158,6 +1222,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        outlier_check=getattr(args, "check_outliers", False),
+        outlier_method=getattr(args, "outlier_method", "iqr"),
+        outlier_threshold=getattr(args, "outlier_threshold", None),
+        outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
     )
     report = auditor.audit_file(
         args.data,

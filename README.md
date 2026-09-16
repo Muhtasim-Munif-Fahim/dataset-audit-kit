@@ -28,6 +28,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Duplicate-row detection.
 - Label balance and label completeness checks.
 - Numeric and categorical drift checks against a reference dataset.
+- Opt-in numeric outlier / extreme-value detection (IQR or z-score).
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -75,6 +76,36 @@ and `--minimal` mode, notices such as "report saved to ..." go to stderr, so
 stdout stays parseable: `dataset-audit-kit audit data.csv --json | jq .`.
 
 Use `--html-out report.html` to export a shareable standalone HTML report.
+
+### Outlier / extreme-value checks
+
+Numeric columns can be scanned for extreme values during `audit` and `check`. The check is off by default so a long-tailed column does not fail a run unless you ask for it.
+
+```bash
+dataset-audit-kit audit data.csv --check-outliers
+dataset-audit-kit audit data.csv --check-outliers --outlier-method zscore --outlier-threshold 3
+dataset-audit-kit audit data.csv --check-outliers --max-outlier-ratio 0.05
+```
+
+IQR (Tukey fences at `Q1 - k×IQR` / `Q3 + k×IQR`, default `k=1.5`) is the default method. Switch to `--outlier-method zscore` for a mean/standard-deviation rule. `--max-outlier-ratio` is the share of values a column may have outside the fences before a warning is raised (default `0`, so any outlier flags).
+
+Findings are one issue per column, with the count, ratio, fences or `|z|` cutoff, and the extreme min/max. JSON reports also include `outlier_summary`; Markdown and HTML reports add an **Outliers** table with per-column IQR detail even when the check is off.
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+auditor = DatasetAuditor(
+    outlier_check=True,
+    outlier_method="iqr",      # or "zscore"
+    outlier_threshold=1.5,     # IQR multiplier, or z-score cutoff
+    outlier_max_ratio=0.0,
+)
+report = auditor.audit_file("data.csv")
+```
+
+Per-column rules still support `max_outlier_ratio`, `percentile_fences`, and `max_zscore` when you want a contract on specific fields rather than a dataset-wide scan.
 
 Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
 
@@ -223,6 +254,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - Duplicate rows.
 - Label distribution.
 - Drift score summaries for reference comparisons.
+- Numeric outlier summaries (IQR fences, counts, and ratios) plus opt-in outlier issues.
 - A short issue list with severity, column, and explanation.
 
 ## Roadmap
