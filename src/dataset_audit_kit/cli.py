@@ -57,6 +57,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Significance level for the two-sample KS drift test (default: 0.05)",
     )
     audit.add_argument(
+        "--psi-threshold",
+        type=_non_negative_float,
+        default=None,
+        help=(
+            "PSI warning threshold when a reference dataset is supplied "
+            "(default: same as --drift-threshold). Conventional cutoffs: "
+            "0.10 moderate, 0.25 large."
+        ),
+    )
+    audit.add_argument(
+        "--psi-bins",
+        type=_psi_bins,
+        default=10,
+        help="Equal-frequency bins for numeric PSI (default: 10)",
+    )
+    audit.add_argument(
         "--fail-on",
         choices=["warning", "error"],
         default="warning",
@@ -365,6 +381,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Significance level for the two-sample KS drift test (default: 0.05)",
+    )
+    check.add_argument(
+        "--psi-threshold",
+        type=_non_negative_float,
+        default=None,
+        help=(
+            "PSI warning threshold when a reference dataset is supplied "
+            "(default: same as --drift-threshold). Conventional cutoffs: "
+            "0.10 moderate, 0.25 large."
+        ),
+    )
+    check.add_argument(
+        "--psi-bins",
+        type=_psi_bins,
+        default=10,
+        help="Equal-frequency bins for numeric PSI (default: 10)",
     )
     check.add_argument(
         "--fail-on",
@@ -799,6 +831,18 @@ def _non_negative_float(text: str) -> float:
     return value
 
 
+def _psi_bins(text: str) -> int:
+    """Parse the equal-frequency bin count used by numeric PSI."""
+
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer of at least 2") from exc
+    if value < 2:
+        raise argparse.ArgumentTypeError("must be an integer of at least 2")
+    return value
+
+
 def _positive_float(text: str) -> float:
     """Parse an argparse value that must be strictly positive and finite."""
 
@@ -891,6 +935,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        psi_threshold=getattr(args, "psi_threshold", None),
+        psi_bins=getattr(args, "psi_bins", 10),
         outlier_check=getattr(args, "check_outliers", False),
         outlier_method=getattr(args, "outlier_method", "iqr"),
         outlier_threshold=getattr(args, "outlier_threshold", None),
@@ -1075,6 +1121,8 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "rules_file": args.rules,
         "rules_profile": args.profile,
         "ks_alpha": args.ks_alpha,
+        "psi_threshold": getattr(args, "psi_threshold", None),
+        "psi_bins": getattr(args, "psi_bins", 10),
         "max_category_share": getattr(args, "max_category_share", None),
         "rare_category_share": getattr(args, "rare_category_share", None),
         "outlier_check": getattr(args, "check_outliers", False),
@@ -1222,6 +1270,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        psi_threshold=getattr(args, "psi_threshold", None),
+        psi_bins=getattr(args, "psi_bins", 10),
         outlier_check=getattr(args, "check_outliers", False),
         outlier_method=getattr(args, "outlier_method", "iqr"),
         outlier_threshold=getattr(args, "outlier_threshold", None),

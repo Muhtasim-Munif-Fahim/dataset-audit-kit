@@ -38,6 +38,13 @@ DEFAULT_IQR_FENCE = 1.5
 #: Population z-score cutoff used when ``outlier_method="zscore"`` and no threshold is set.
 DEFAULT_ZSCORE_THRESHOLD = 3.0
 
+#: Equal-frequency bin count used for numeric Population Stability Index (PSI).
+DEFAULT_PSI_BINS = 10
+
+#: Floor applied to bin/category proportions so PSI stays defined when a
+#: bucket is empty in one of the two samples.
+PSI_PROPORTION_FLOOR = 1e-6
+
 #: Fraction of its weight a warning contributes, relative to an error.
 RISK_WARNING_FACTOR = 0.5
 
@@ -1536,7 +1543,7 @@ class AuditReport:
                 col = issue.column or ""
                 suggestion["code"] = "# Consider stratified sampling or class weighting"
                 suggestion["description"] = f"Address label imbalance in '{col}' via resampling or weighting."
-            elif issue.check == "drift":
+            elif issue.check in {"drift", "psi"}:
                 suggestion["action"] = "investigate_drift"
                 suggestion["code"] = "# Review data pipeline for distribution shift source"
                 suggestion["description"] = "Investigate root cause of distribution drift."
@@ -3040,6 +3047,8 @@ class DatasetAuditor:
         missing_cooccurrence_min_count: int = 1,
         missing_cooccurrence_top: int | None = 10,
         ks_alpha: float = 0.05,
+        psi_threshold: float | None = None,
+        psi_bins: int = DEFAULT_PSI_BINS,
         outlier_check: bool = False,
         outlier_method: str = "iqr",
         outlier_threshold: float | None = None,
@@ -3058,6 +3067,19 @@ class DatasetAuditor:
             or not 0.0 <= float(ks_alpha) <= 1.0
         ):
             raise ValueError("ks_alpha must be a number between 0 and 1")
+        if psi_threshold is not None and (
+            isinstance(psi_threshold, bool)
+            or not isinstance(psi_threshold, (int, float))
+            or not math.isfinite(float(psi_threshold))
+            or float(psi_threshold) < 0.0
+        ):
+            raise ValueError("psi_threshold must be a non-negative finite number")
+        if (
+            isinstance(psi_bins, bool)
+            or not isinstance(psi_bins, int)
+            or psi_bins < 2
+        ):
+            raise ValueError("psi_bins must be an integer of at least 2")
         if (
             isinstance(missing_cooccurrence_min_count, bool)
             or not isinstance(missing_cooccurrence_min_count, int)
@@ -3144,6 +3166,10 @@ class DatasetAuditor:
         self.missing_cooccurrence_min_count = missing_cooccurrence_min_count
         self.missing_cooccurrence_top = missing_cooccurrence_top
         self.ks_alpha = float(ks_alpha)
+        self.psi_threshold = (
+            float(psi_threshold) if psi_threshold is not None else None
+        )
+        self.psi_bins = int(psi_bins)
         self.outlier_check = bool(outlier_check)
         self.outlier_method = outlier_method
         if outlier_threshold is None:
@@ -4914,11 +4940,14 @@ class DatasetAuditor:
             current = data[column]
             baseline = reference[column]
 
+            psi_score = self.population_stability_index(
+                baseline, current, bins=self.psi_bins
+            )
+            drift_scores[f"{column}__psi"] = psi_score
+
             if pd.api.types.is_numeric_dtype(current) and pd.api.types.is_numeric_dtype(baseline):
                 score = self._numeric_drift(current, baseline)
-                psi_score = self.population_stability_index(baseline, current)
                 ks_stat, ks_pvalue = self.kolmogorov_smirnov_test(baseline, current)
-                drift_scores[f"{column}__psi"] = psi_score
                 drift_scores[f"{column}__ks_stat"] = ks_stat
                 drift_scores[f"{column}__ks_pvalue"] = ks_pvalue
                 if ks_pvalue < self.ks_alpha:
@@ -4937,7 +4966,6 @@ class DatasetAuditor:
                     )
             else:
                 score = self._categorical_drift(current.astype(str), baseline.astype(str))
-                psi_score = None
                 self._categorical_level_drift(current, baseline, issues, column)
 
             drift_scores[column] = score
@@ -4945,6 +4973,13 @@ class DatasetAuditor:
             threshold = (
                 rule.max_drift
                 if rule is not None and rule.max_drift is not None
+                else self.drift_threshold
+            )
+            psi_threshold = (
+                rule.max_drift
+                if rule is not None and rule.max_drift is not None
+                else self.psi_threshold
+                if self.psi_threshold is not None
                 else self.drift_threshold
             )
             if score >= threshold:
@@ -4958,15 +4993,15 @@ class DatasetAuditor:
                         threshold=threshold,
                     )
                 )
-            if psi_score is not None and psi_score >= threshold:
+            if psi_score >= psi_threshold:
                 issues.append(
                     AuditIssue(
                         check="psi",
                         severity="warning",
-                        message=f"PSI {psi_score:.3f} exceeds the {threshold:.3f} threshold.",
+                        message=f"PSI {psi_score:.3f} exceeds the {psi_threshold:.3f} threshold.",
                         column=column,
                         observed=psi_score,
-                        threshold=threshold,
+                        threshold=psi_threshold,
                     )
                 )
 
@@ -5171,23 +5206,68 @@ class DatasetAuditor:
     def population_stability_index(
         baseline: pd.Series,
         current: pd.Series,
-        bins: int = 10,
+        bins: int = DEFAULT_PSI_BINS,
     ) -> float:
-        """Population Stability Index (PSI) between two numeric samples.
+        """Population Stability Index (PSI) between two samples.
 
-        The *baseline* distribution is split into ``bins`` equal-frequency
-        buckets using its own quantiles; the *current* sample is measured
-        against those same buckets. PSI sums
-        ``(p_current - p_base) * ln(p_current / p_base)`` over the buckets.
+        Numeric samples are split into ``bins`` equal-frequency buckets using
+        the *baseline* quantiles; the *current* sample is measured against
+        those same buckets. Values outside the baseline range are folded into
+        the nearest edge bucket, matching the standard PSI convention.
+        Categorical (and other non-numeric) samples compare category
+        proportions over the union of observed levels.
+
+        PSI sums ``(p_current - p_base) * ln(p_current / p_base)`` over the
+        buckets or categories.
 
         Conventional interpretation: PSI < 0.1 signals no material shift,
         0.1-0.25 a moderate one, and above 0.25 a large one. A value of 0.0
         means the two samples are distributionally identical within the
-        chosen binning. Values outside the baseline range are folded into the
-        nearest edge bucket, matching the standard PSI convention.
+        chosen binning.
         """
-        baseline_vals = pd.to_numeric(baseline, errors="coerce").dropna().to_numpy()
-        current_vals = pd.to_numeric(current, errors="coerce").dropna().to_numpy()
+        if DatasetAuditor._psi_use_numeric(baseline, current):
+            return DatasetAuditor._numeric_psi(baseline, current, bins=bins)
+        return DatasetAuditor._categorical_psi(baseline, current)
+
+    @staticmethod
+    def _psi_use_numeric(baseline: pd.Series, current: pd.Series) -> bool:
+        """Return True when both samples should take the quantile-binned path."""
+
+        return (
+            DatasetAuditor._psi_numeric_share(baseline) > 0.8
+            and DatasetAuditor._psi_numeric_share(current) > 0.8
+        )
+
+    @staticmethod
+    def _psi_numeric_share(series: pd.Series) -> float:
+        """Fraction of non-missing values that coerce to a number.
+
+        Datetime/timedelta columns are treated as categorical even though
+        ``pd.to_numeric`` can turn them into epoch integers. A numeric dtype
+        (including bool) always takes the numeric path so a short or empty
+        numeric sample returns 0.0 instead of falling through to categories.
+        """
+
+        if pd.api.types.is_datetime64_any_dtype(series) or pd.api.types.is_timedelta64_dtype(
+            series
+        ):
+            return 0.0
+        if pd.api.types.is_numeric_dtype(series):
+            return 1.0
+        dropped = series.dropna()
+        if dropped.empty:
+            return 0.0
+        numeric = pd.to_numeric(dropped, errors="coerce")
+        return float(numeric.notna().sum() / len(dropped))
+
+    @staticmethod
+    def _numeric_psi(baseline: pd.Series, current: pd.Series, bins: int) -> float:
+        baseline_vals = pd.to_numeric(baseline, errors="coerce").dropna().to_numpy(
+            dtype=float
+        )
+        current_vals = pd.to_numeric(current, errors="coerce").dropna().to_numpy(
+            dtype=float
+        )
         if baseline_vals.size < 2 or current_vals.size < 1:
             return 0.0
         n_bins = max(2, min(int(bins), baseline_vals.size))
@@ -5195,10 +5275,32 @@ class DatasetAuditor:
         edges = np.unique(edges)
         if edges.size < 2:
             return 0.0
+        current_vals = np.clip(current_vals, edges[0], edges[-1])
         base_counts, _ = np.histogram(baseline_vals, bins=edges)
         current_counts, _ = np.histogram(current_vals, bins=edges)
-        base_pct = np.clip(base_counts / baseline_vals.size, 1e-6, None)
-        current_pct = np.clip(current_counts / current_vals.size, 1e-6, None)
+        return DatasetAuditor._psi_from_counts(base_counts, current_counts)
+
+    @staticmethod
+    def _categorical_psi(baseline: pd.Series, current: pd.Series) -> float:
+        base = baseline.dropna().astype(str)
+        cur = current.dropna().astype(str)
+        if base.size < 1 or cur.size < 1:
+            return 0.0
+        base_counts = base.value_counts()
+        cur_counts = cur.value_counts()
+        categories = sorted(set(base_counts.index).union(cur_counts.index))
+        base_arr = np.array([float(base_counts.get(c, 0)) for c in categories])
+        cur_arr = np.array([float(cur_counts.get(c, 0)) for c in categories])
+        return DatasetAuditor._psi_from_counts(base_arr, cur_arr)
+
+    @staticmethod
+    def _psi_from_counts(base_counts: np.ndarray, current_counts: np.ndarray) -> float:
+        base_total = float(np.sum(base_counts))
+        current_total = float(np.sum(current_counts))
+        if base_total <= 0.0 or current_total <= 0.0:
+            return 0.0
+        base_pct = np.clip(base_counts / base_total, PSI_PROPORTION_FLOOR, None)
+        current_pct = np.clip(current_counts / current_total, PSI_PROPORTION_FLOOR, None)
         psi = float(np.sum((current_pct - base_pct) * np.log(current_pct / base_pct)))
         return max(psi, 0.0)
 
