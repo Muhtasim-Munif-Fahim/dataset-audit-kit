@@ -27,7 +27,8 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Missingness summary by column.
 - Duplicate-row detection.
 - Label balance and label completeness checks.
-- Numeric and categorical drift checks against a reference dataset.
+- Numeric and categorical drift checks against a reference dataset, including Population Stability Index (PSI).
+- Kolmogorov-Smirnov significance test for numeric distribution drift.
 - Opt-in numeric outlier / extreme-value detection (IQR or z-score).
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
@@ -106,6 +107,35 @@ report = auditor.audit_file("data.csv")
 ```
 
 Per-column rules still support `max_outlier_ratio`, `percentile_fences`, and `max_zscore` when you want a contract on specific fields rather than a dataset-wide scan.
+
+### Population Stability Index (PSI)
+
+When `--reference` is supplied, the audit computes PSI for every shared column except the label. Numeric columns are split into equal-frequency quantile bins from the reference (values outside that range fold into the nearest edge bucket). Categorical columns compare category proportions over the union of observed levels.
+
+Findings show up in every report format:
+
+- JSON: `{column}__psi` inside `drift_scores`, plus `issues` entries with `check: "psi"`
+- Markdown / HTML: the drift-score table and the issue list
+
+```bash
+dataset-audit-kit audit data.csv --reference baseline.csv
+dataset-audit-kit audit data.csv --reference baseline.csv --psi-threshold 0.25
+dataset-audit-kit audit data.csv --reference baseline.csv --psi-bins 20
+```
+
+Conventionally, PSI < 0.10 is a stable shift, 0.10–0.25 is moderate, and above 0.25 is large. The warning threshold defaults to `--drift-threshold` (0.20) unless `--psi-threshold` or a per-column `max_drift` rule is set.
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+auditor = DatasetAuditor(psi_threshold=0.25, psi_bins=10)
+report = auditor.audit_file("data.csv", reference_path="baseline.csv")
+print(report.drift_scores["revenue__psi"])
+```
+
+`--psi-threshold` and `--psi-bins` are part of the report `config_hash`, so two saved reports with different PSI settings will not compare as the same contract.
 
 Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
 
@@ -253,7 +283,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - Missing values per column.
 - Duplicate rows.
 - Label distribution.
-- Drift score summaries for reference comparisons.
+- Drift score summaries for reference comparisons, including PSI (`{column}__psi`) and KS statistic/p-value.
 - Numeric outlier summaries (IQR fences, counts, and ratios) plus opt-in outlier issues.
 - A short issue list with severity, column, and explanation.
 
