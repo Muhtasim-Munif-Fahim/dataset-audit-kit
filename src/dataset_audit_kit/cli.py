@@ -52,9 +52,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument(
         "--ks-alpha",
-        type=float,
+        type=_unit_interval,
         default=0.05,
-        help="Significance level for the two-sample KS drift test (default: 0.05)",
+        help=(
+            "Significance level for the two-sample KS drift test on numeric "
+            "columns when a reference dataset is supplied (default: 0.05). "
+            "A finding is emitted when p < this alpha and D is at least "
+            "--ks-threshold."
+        ),
+    )
+    audit.add_argument(
+        "--ks-threshold",
+        type=_unit_interval,
+        default=0.0,
+        help=(
+            "Minimum KS statistic D required before a significant p-value "
+            "is reported (default: 0). Raise this for a practical-size gate; "
+            "p-values shrink with sample size even for tiny shifts."
+        ),
     )
     audit.add_argument(
         "--psi-threshold",
@@ -378,9 +393,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument(
         "--ks-alpha",
-        type=float,
+        type=_unit_interval,
         default=0.05,
-        help="Significance level for the two-sample KS drift test (default: 0.05)",
+        help=(
+            "Significance level for the two-sample KS drift test on numeric "
+            "columns when a reference dataset is supplied (default: 0.05). "
+            "A finding is emitted when p < this alpha and D is at least "
+            "--ks-threshold."
+        ),
+    )
+    check.add_argument(
+        "--ks-threshold",
+        type=_unit_interval,
+        default=0.0,
+        help=(
+            "Minimum KS statistic D required before a significant p-value "
+            "is reported (default: 0). Raise this for a practical-size gate; "
+            "p-values shrink with sample size even for tiny shifts."
+        ),
     )
     check.add_argument(
         "--psi-threshold",
@@ -935,6 +965,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        ks_threshold=getattr(args, "ks_threshold", 0.0),
         psi_threshold=getattr(args, "psi_threshold", None),
         psi_bins=getattr(args, "psi_bins", 10),
         outlier_check=getattr(args, "check_outliers", False),
@@ -1121,6 +1152,7 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "rules_file": args.rules,
         "rules_profile": args.profile,
         "ks_alpha": args.ks_alpha,
+        "ks_threshold": getattr(args, "ks_threshold", 0.0),
         "psi_threshold": getattr(args, "psi_threshold", None),
         "psi_bins": getattr(args, "psi_bins", 10),
         "max_category_share": getattr(args, "max_category_share", None),
@@ -1270,6 +1302,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         missing_cooccurrence_min_count=args.missing_cooccurrence_min_count,
         missing_cooccurrence_top=args.missing_cooccurrence_top,
         ks_alpha=args.ks_alpha,
+        ks_threshold=getattr(args, "ks_threshold", 0.0),
         psi_threshold=getattr(args, "psi_threshold", None),
         psi_bins=getattr(args, "psi_bins", 10),
         outlier_check=getattr(args, "check_outliers", False),
