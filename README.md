@@ -137,6 +137,35 @@ print(report.drift_scores["revenue__psi"])
 
 `--psi-threshold` and `--psi-bins` are part of the report `config_hash`, so two saved reports with different PSI settings will not compare as the same contract.
 
+### Kolmogorov–Smirnov numeric drift
+
+When `--reference` is supplied, the audit also runs a two-sample Kolmogorov–Smirnov test on every shared **numeric** column except the label (categorical and boolean columns are skipped; they already have PSI and category-level checks). The test records both the statistic `D` (largest gap between the empirical CDFs) and an asymptotic two-sided p-value. Unlike the mean-ratio drift score and PSI's bins, KS is shape-aware: it flags a spread or modality change even when the mean stays put.
+
+A `ks_drift` warning is raised when `p < --ks-alpha` **and** `D >= --ks-threshold`. The p-value gate defaults to `0.05`. The D gate defaults to `0` (any statistically significant result is reported). Raise `--ks-threshold` when you want a practical-size filter: with large samples the p-value shrinks even for tiny shifts.
+
+Findings show up in every report format:
+
+- JSON: `{column}__ks_stat` and `{column}__ks_pvalue` inside `drift_scores`, plus `issues` entries with `check: "ks_drift"`
+- Markdown / HTML: the drift-score table and the issue list
+
+```bash
+dataset-audit-kit audit data.csv --reference baseline.csv
+dataset-audit-kit audit data.csv --reference baseline.csv --ks-alpha 0.01
+dataset-audit-kit audit data.csv --reference baseline.csv --ks-threshold 0.10
+```
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+auditor = DatasetAuditor(ks_alpha=0.05, ks_threshold=0.10)
+report = auditor.audit_file("data.csv", reference_path="baseline.csv")
+print(report.drift_scores["revenue__ks_stat"], report.drift_scores["revenue__ks_pvalue"])
+```
+
+`--ks-alpha` and `--ks-threshold` are part of the report `config_hash`.
+
 Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
 
 ### Exit codes

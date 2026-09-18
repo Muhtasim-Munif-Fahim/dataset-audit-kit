@@ -41,6 +41,14 @@ DEFAULT_ZSCORE_THRESHOLD = 3.0
 #: Equal-frequency bin count used for numeric Population Stability Index (PSI).
 DEFAULT_PSI_BINS = 10
 
+#: Default two-sample KS significance level (p-value gate) for numeric drift.
+DEFAULT_KS_ALPHA = 0.05
+
+#: Default minimum KS statistic D required before a significant p-value is
+#: reported. 0.0 means any statistically significant result is a finding;
+#: raise this to require a practical-size shift as well.
+DEFAULT_KS_THRESHOLD = 0.0
+
 #: Floor applied to bin/category proportions so PSI stays defined when a
 #: bucket is empty in one of the two samples.
 PSI_PROPORTION_FLOOR = 1e-6
@@ -1543,7 +1551,7 @@ class AuditReport:
                 col = issue.column or ""
                 suggestion["code"] = "# Consider stratified sampling or class weighting"
                 suggestion["description"] = f"Address label imbalance in '{col}' via resampling or weighting."
-            elif issue.check in {"drift", "psi"}:
+            elif issue.check in {"drift", "psi", "ks_drift"}:
                 suggestion["action"] = "investigate_drift"
                 suggestion["code"] = "# Review data pipeline for distribution shift source"
                 suggestion["description"] = "Investigate root cause of distribution drift."
@@ -3046,7 +3054,8 @@ class DatasetAuditor:
         missing_cooccurrence_check: bool = False,
         missing_cooccurrence_min_count: int = 1,
         missing_cooccurrence_top: int | None = 10,
-        ks_alpha: float = 0.05,
+        ks_alpha: float = DEFAULT_KS_ALPHA,
+        ks_threshold: float = DEFAULT_KS_THRESHOLD,
         psi_threshold: float | None = None,
         psi_bins: int = DEFAULT_PSI_BINS,
         outlier_check: bool = False,
@@ -3067,6 +3076,13 @@ class DatasetAuditor:
             or not 0.0 <= float(ks_alpha) <= 1.0
         ):
             raise ValueError("ks_alpha must be a number between 0 and 1")
+        if (
+            isinstance(ks_threshold, bool)
+            or not isinstance(ks_threshold, (int, float))
+            or not math.isfinite(float(ks_threshold))
+            or not 0.0 <= float(ks_threshold) <= 1.0
+        ):
+            raise ValueError("ks_threshold must be a number between 0 and 1")
         if psi_threshold is not None and (
             isinstance(psi_threshold, bool)
             or not isinstance(psi_threshold, (int, float))
@@ -3166,6 +3182,7 @@ class DatasetAuditor:
         self.missing_cooccurrence_min_count = missing_cooccurrence_min_count
         self.missing_cooccurrence_top = missing_cooccurrence_top
         self.ks_alpha = float(ks_alpha)
+        self.ks_threshold = float(ks_threshold)
         self.psi_threshold = (
             float(psi_threshold) if psi_threshold is not None else None
         )
@@ -4945,19 +4962,29 @@ class DatasetAuditor:
             )
             drift_scores[f"{column}__psi"] = psi_score
 
-            if pd.api.types.is_numeric_dtype(current) and pd.api.types.is_numeric_dtype(baseline):
+            if DatasetAuditor._ks_numeric(current) and DatasetAuditor._ks_numeric(baseline):
                 score = self._numeric_drift(current, baseline)
                 ks_stat, ks_pvalue = self.kolmogorov_smirnov_test(baseline, current)
                 drift_scores[f"{column}__ks_stat"] = ks_stat
                 drift_scores[f"{column}__ks_pvalue"] = ks_pvalue
-                if ks_pvalue < self.ks_alpha:
+                if (
+                    ks_pvalue < self.ks_alpha
+                    and ks_stat >= self.ks_threshold
+                ):
                     issues.append(
                         AuditIssue(
                             check="ks_drift",
                             severity="warning",
                             message=(
                                 f"KS test for '{column}' is significant "
-                                f"(D={ks_stat:.3f}, p={ks_pvalue:.3g} < ks_alpha={self.ks_alpha})."
+                                f"(D={ks_stat:.3f}, p={ks_pvalue:.3g} < "
+                                f"ks_alpha={self.ks_alpha}"
+                                + (
+                                    f", D >= ks_threshold={self.ks_threshold}"
+                                    if self.ks_threshold > 0.0
+                                    else ""
+                                )
+                                + ")."
                             ),
                             column=column,
                             observed=ks_pvalue,
@@ -5305,12 +5332,24 @@ class DatasetAuditor:
         return max(psi, 0.0)
 
     @staticmethod
+    def _ks_numeric(series: pd.Series) -> bool:
+        """Return True when a column is eligible for the two-sample KS test.
+
+        Boolean columns are numeric in pandas but are two-point category
+        distributions, so they take the categorical drift path instead.
+        """
+
+        return pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(
+            series
+        )
+
+    @staticmethod
     def kolmogorov_smirnov_test(
         baseline: pd.Series, current: pd.Series
     ) -> tuple[float, float]:
         """Two-sample Kolmogorov-Smirnov statistic and asymptotic p-value.
 
-        Returns ``(D, p``) where ``D`` is the maximum absolute difference
+        Returns ``(D, p)`` where ``D`` is the maximum absolute difference
         between the empirical CDFs of the two samples and ``p`` is a
         two-sided p-value from the asymptotic Kolmogorov distribution. The
         test is distribution-shape aware, so unlike the mean-ratio and PSI
@@ -5318,11 +5357,13 @@ class DatasetAuditor:
         bimodally-shifted or spread-out distribution. No scipy dependency:
         the p-value uses the standard Stephens continuity-corrected argument
         into the Kolmogorov survival series. Samples with fewer than two
-        observed values return ``(0.0, 1.0)``.
+        finite observed values return ``(0.0, 1.0)``.
         """
 
-        base_vals = pd.to_numeric(baseline, errors="coerce").dropna().to_numpy()
-        current_vals = pd.to_numeric(current, errors="coerce").dropna().to_numpy()
+        base_vals = pd.to_numeric(baseline, errors="coerce").to_numpy(dtype=float)
+        current_vals = pd.to_numeric(current, errors="coerce").to_numpy(dtype=float)
+        base_vals = base_vals[np.isfinite(base_vals)]
+        current_vals = current_vals[np.isfinite(current_vals)]
         n = base_vals.size
         m = current_vals.size
         if n < 2 or m < 2:
