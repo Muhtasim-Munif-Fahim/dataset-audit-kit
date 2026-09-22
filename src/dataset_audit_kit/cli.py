@@ -11,7 +11,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Sequence
 
-from .core import AuditReport, DatasetAuditor, ValidationRules
+from .core import DEFAULT_VIF_THRESHOLD, AuditReport, DatasetAuditor, ValidationRules
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +294,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Fraction of outliers allowed per column before warning (default: 0)",
     )
+    audit.add_argument(
+        "--check-vif",
+        action="store_true",
+        help="Flag numeric columns with a high variance inflation factor",
+    )
+    audit.add_argument(
+        "--vif-threshold",
+        type=_positive_float,
+        default=DEFAULT_VIF_THRESHOLD,
+        help=(
+            "VIF at or above which a numeric column is flagged "
+            f"(default: {DEFAULT_VIF_THRESHOLD:g}). "
+            "Common cutoffs: 5 moderate, 10 severe."
+        ),
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -555,6 +570,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=_unit_interval,
         default=0.0,
         help="Fraction of outliers allowed per column before warning (default: 0)",
+    )
+    check.add_argument(
+        "--check-vif",
+        action="store_true",
+        help="Flag numeric columns with a high variance inflation factor",
+    )
+    check.add_argument(
+        "--vif-threshold",
+        type=_positive_float,
+        default=DEFAULT_VIF_THRESHOLD,
+        help=(
+            "VIF at or above which a numeric column is flagged "
+            f"(default: {DEFAULT_VIF_THRESHOLD:g}). "
+            "Common cutoffs: 5 moderate, 10 severe."
+        ),
     )
 
     columns_parser = subparsers.add_parser("columns", help="List columns with their data types")
@@ -972,6 +1002,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         outlier_method=getattr(args, "outlier_method", "iqr"),
         outlier_threshold=getattr(args, "outlier_threshold", None),
         outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
+        vif_check=getattr(args, "check_vif", False),
+        vif_threshold=getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -1161,6 +1193,8 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "outlier_method": getattr(args, "outlier_method", "iqr"),
         "outlier_threshold": getattr(args, "outlier_threshold", None),
         "outlier_max_ratio": getattr(args, "max_outlier_ratio", 0.0),
+        "vif_check": getattr(args, "check_vif", False),
+        "vif_threshold": getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
     }
     if args.rules:
         fingerprint["rules_sha256"] = hashlib.sha256(
@@ -1309,6 +1343,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
         outlier_method=getattr(args, "outlier_method", "iqr"),
         outlier_threshold=getattr(args, "outlier_threshold", None),
         outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
+        vif_check=getattr(args, "check_vif", False),
+        vif_threshold=getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
     )
     report = auditor.audit_file(
         args.data,

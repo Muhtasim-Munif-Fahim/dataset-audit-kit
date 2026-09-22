@@ -11,7 +11,7 @@ from .core import (
     ValidationRules,
 )
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 __all__ = [
     "AuditIssue",

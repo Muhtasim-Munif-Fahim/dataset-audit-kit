@@ -30,6 +30,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Numeric and categorical drift checks against a reference dataset, including Population Stability Index (PSI).
 - Kolmogorov-Smirnov significance test for numeric distribution drift.
 - Opt-in numeric outlier / extreme-value detection (IQR or z-score).
+- Opt-in multicollinearity audit via variance inflation factors (VIF) on numeric columns.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -165,6 +166,37 @@ print(report.drift_scores["revenue__ks_stat"], report.drift_scores["revenue__ks_
 ```
 
 `--ks-alpha` and `--ks-threshold` are part of the report `config_hash`.
+
+### Multicollinearity (variance inflation factor)
+
+Numeric columns can be scanned for multicollinearity during `audit` and `check`. The check is off by default. Pairwise redundancy (`|r| >= 0.95`) still runs on every audit; VIF adds the multi-column view, where several moderate correlations can make one feature a near-linear combination of the others even though no single pair crosses that bar.
+
+VIF for a column is `1 / (1 - R²)` from regressing it on the other numeric columns (the diagonal of the inverse correlation matrix). A singular design, such as a duplicated column, is reported as an infinite VIF. Boolean columns are skipped, constant columns are omitted, and rows with a non-finite value in any included column are dropped before the fit. Pass `--label-column` to keep the target out of the design matrix: a feature that tracks the label is signal, not multicollinearity.
+
+A warning is raised when VIF is at or above `--vif-threshold` (default `10`, the usual severe cutoff; `5` is a moderate cutoff). With only two columns, VIF `10` corresponds to `|r| ≈ 0.95`.
+
+```bash
+dataset-audit-kit audit data.csv --check-vif
+dataset-audit-kit audit data.csv --check-vif --vif-threshold 5 --label-column target
+dataset-audit-kit check data.csv --check-vif
+```
+
+Findings show up in every report format:
+
+- JSON: `vif_scores` (a `null` score means infinite VIF) plus `issues` entries with `check: "vif"`
+- Markdown / HTML: a **Variance inflation factors** table and the issue list
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+auditor = DatasetAuditor(vif_check=True, vif_threshold=10)
+report = auditor.audit_file("data.csv", label_column="target")
+print(report.vif_scores)
+```
+
+`--check-vif` and `--vif-threshold` are part of the report `config_hash`.
 
 Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
 
@@ -314,6 +346,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - Label distribution.
 - Drift score summaries for reference comparisons, including PSI (`{column}__psi`) and KS statistic/p-value.
 - Numeric outlier summaries (IQR fences, counts, and ratios) plus opt-in outlier issues.
+- Opt-in variance inflation factors (`vif_scores`) for numeric multicollinearity.
 - A short issue list with severity, column, and explanation.
 
 ## Roadmap
@@ -330,6 +363,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - ~~Add correlate subcommand~~ ✅ v0.3.3
 - ~~Add --csv flag to shape subcommand~~ ✅ v0.3.4
 - ~~Add --select-columns flag to audit subcommand~~ ✅ v0.3.4
+- ~~Add opt-in VIF multicollinearity check~~ ✅ v0.3.7
 
 ## Tests
 
