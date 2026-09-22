@@ -49,6 +49,15 @@ DEFAULT_KS_ALPHA = 0.05
 #: raise this to require a practical-size shift as well.
 DEFAULT_KS_THRESHOLD = 0.0
 
+#: VIF at or above which a numeric column is flagged for multicollinearity.
+#: 10 is the usual "severe" cutoff. For a two-column pair it lines up with
+#: the redundancy gate: |r| = 0.95 implies VIF = 1 / (1 - r²) ≈ 10.26.
+DEFAULT_VIF_THRESHOLD = 10.0
+
+#: Condition number above which the correlation matrix is treated as
+#: singular and VIF falls back to per-column least squares.
+_VIF_SINGULAR_CONDITION = 1e12
+
 #: Floor applied to bin/category proportions so PSI stays defined when a
 #: bucket is empty in one of the two samples.
 PSI_PROPORTION_FLOOR = 1e-6
@@ -120,6 +129,7 @@ _AUDIT_PHASES = (
     "profiles",
     "category_share",
     "redundancy",
+    "vif",
 )
 
 
@@ -178,6 +188,33 @@ def _format_stat(value: object, places: int = 3) -> str:
     if number != number:  # NaN
         return "?"
     return f"{number:.{places}f}"
+
+
+def _format_vif(value: float | None) -> str:
+    """Render a variance inflation factor, using ``infinite`` for a singular fit."""
+
+    if value is None:
+        return "infinite"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return "infinite"
+    return f"{number:.3f}"
+
+
+def _sorted_vif_items(
+    scores: dict[str, float | None],
+) -> list[tuple[str, float | None]]:
+    """Order VIF rows from most collinear to least, then by column name."""
+
+    def sort_key(item: tuple[str, float | None]) -> tuple[float, str]:
+        name, score = item
+        magnitude = float("inf") if score is None else float(score)
+        return (-magnitude, name)
+
+    return sorted(scores.items(), key=sort_key)
 
 
 @dataclass(frozen=True)
@@ -902,6 +939,9 @@ class AuditReport:
     audit_id: str | None = None
     created_utc: str | None = None
     config_hash: str | None = None
+    #: Variance inflation factor per numeric column. Empty unless the opt-in
+    #: VIF check ran. ``None`` means perfect collinearity (infinite VIF).
+    vif_scores: dict[str, float | None] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -971,6 +1011,7 @@ class AuditReport:
             "issues": [issue.__dict__ for issue in self.issues],
             "rule_cooccurrence": self.rule_cooccurrence(),
             "outlier_summary": self.outlier_summary(),
+            "vif_scores": self.vif_scores,
         }
         if any((self.audit_id, self.created_utc, self.config_hash)):
             payload["meta"] = {
@@ -1215,6 +1256,11 @@ class AuditReport:
                     f"{_format_stat(row['upper_fence'])}]"
                 )
 
+        if self.vif_scores:
+            lines.extend(["", "## Variance inflation factors"])
+            for column, score in _sorted_vif_items(self.vif_scores):
+                lines.append(f"- `{column}`: {_format_vif(score)}")
+
         if self.issues:
             lines.extend(["", "## Issues"])
             for issue in self.issues:
@@ -1452,6 +1498,21 @@ class AuditReport:
                 "</tbody></table>",
             ])
 
+        if self.vif_scores:
+            vif_html_rows = [
+                "<tr>"
+                f"<td>{esc(column)}</td>"
+                f"<td>{esc(_format_vif(score))}</td>"
+                "</tr>"
+                for column, score in _sorted_vif_items(self.vif_scores)
+            ]
+            sections.extend([
+                "<h2>Variance inflation factors</h2>",
+                "<table><thead><tr><th>Column</th><th>VIF</th></tr></thead><tbody>",
+                *vif_html_rows,
+                "</tbody></table>",
+            ])
+
         rule_cooccurrence = self.rule_cooccurrence()
         if rule_cooccurrence:
             cooccurrence_rows: list[str] = []
@@ -1574,6 +1635,14 @@ class AuditReport:
                 )
                 suggestion["description"] = (
                     f"Clip extreme values in '{col}' to the IQR fences, or investigate them."
+                )
+            elif issue.check == "vif":
+                col = issue.column or ""
+                suggestion["action"] = "drop_collinear"
+                suggestion["code"] = f"df = df.drop(columns=['{col}'])"
+                suggestion["description"] = (
+                    f"Drop '{col}' or another numeric column in the collinear "
+                    "set before fitting a linear model."
                 )
             else:
                 suggestion["action"] = "manual_review"
@@ -3062,6 +3131,8 @@ class DatasetAuditor:
         outlier_method: str = "iqr",
         outlier_threshold: float | None = None,
         outlier_max_ratio: float = 0.0,
+        vif_check: bool = False,
+        vif_threshold: float = DEFAULT_VIF_THRESHOLD,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -3143,6 +3214,13 @@ class DatasetAuditor:
             or not 0.0 <= float(outlier_max_ratio) <= 1.0
         ):
             raise ValueError("outlier_max_ratio must be a fraction between 0 and 1")
+        if (
+            isinstance(vif_threshold, bool)
+            or not isinstance(vif_threshold, (int, float))
+            or not math.isfinite(float(vif_threshold))
+            or float(vif_threshold) <= 0.0
+        ):
+            raise ValueError("vif_threshold must be a positive finite number")
         validated_weights: dict[str, float] = {}
         for check, weight in (severity_weights or {}).items():
             if (
@@ -3196,6 +3274,8 @@ class DatasetAuditor:
         else:
             self.outlier_threshold = float(outlier_threshold)
         self.outlier_max_ratio = float(outlier_max_ratio)
+        self.vif_check = bool(vif_check)
+        self.vif_threshold = float(vif_threshold)
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -3411,6 +3491,11 @@ class DatasetAuditor:
         # Identical-content columns that correlation cannot see
         self._check_duplicate_columns(data, issues)
 
+        progress.advance("vif")
+        vif_scores: dict[str, float | None] = {}
+        if self.vif_check:
+            vif_scores = self._check_vif(data, issues, label_column=label_column)
+
         progress.close()
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
@@ -3426,6 +3511,7 @@ class DatasetAuditor:
             label_distribution=label_distribution,
             drift_scores=all_drift_scores,
             issues=issues,
+            vif_scores=vif_scores,
         )
         report.risk_score = self._risk_score(issues)
         return report
@@ -5394,6 +5480,177 @@ class DatasetAuditor:
                 break
             k += 1
         return float(min(max(2.0 * series, 0.0), 1.0))
+
+    def _check_vif(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        label_column: str | None = None,
+    ) -> dict[str, float | None]:
+        """Flag numeric columns whose variance inflation factor is too high.
+
+        Opt-in because a collinear feature set is a modeling problem, not
+        always a data defect: trees ignore it, linear models do not. Boolean
+        columns are skipped, and ``label_column`` is left out of the design
+        matrix so a feature that tracks the target is not called
+        multicollinearity. Scores are estimated from the correlation matrix
+        of the complete numeric rows; a singular matrix (perfect
+        collinearity) is reported as an infinite VIF.
+        """
+
+        pieces: list[pd.Series] = []
+        seen: set[str] = set()
+        label_name = None if label_column is None else str(label_column)
+        for position, column in enumerate(data.columns):
+            name = str(column)
+            if name == label_name or name in seen:
+                continue
+            col = data.iloc[:, position]
+            if not pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col):
+                continue
+            seen.add(name)
+            numeric = pd.to_numeric(col, errors="coerce")
+            numeric.index = data.index
+            pieces.append(numeric.rename(name))
+        if len(pieces) < 2:
+            return {}
+
+        frame = pd.concat(pieces, axis=1)
+        scores, partners = DatasetAuditor._variance_inflation_factors(frame)
+        if not scores:
+            return {}
+
+        reported: dict[str, float | None] = {}
+        threshold = self.vif_threshold
+        for name, vif in scores.items():
+            if math.isfinite(vif):
+                stored: float | None = round(float(vif), 6)
+            else:
+                stored = None
+            reported[name] = stored
+            if stored is not None and stored < threshold:
+                continue
+            partner_name, partner_r = partners.get(name, (None, None))
+            if partner_name is None:
+                alignment = ""
+            else:
+                alignment = (
+                    f"; most aligned with '{partner_name}' "
+                    f"(|r|={partner_r:.3f})"
+                )
+            if stored is None:
+                message = (
+                    f"VIF is infinite (perfect collinearity{alignment}), "
+                    f"above the {threshold:g} threshold."
+                )
+                observed: float | None = None
+            else:
+                message = (
+                    f"VIF {stored:.3f} exceeds the {threshold:g} threshold"
+                    f"{alignment}."
+                )
+                observed = round(stored, 4)
+            issues.append(
+                AuditIssue(
+                    check="vif",
+                    severity="warning",
+                    message=message,
+                    column=name,
+                    observed=observed,
+                    threshold=threshold,
+                )
+            )
+        return reported
+
+    @staticmethod
+    def _variance_inflation_factors(
+        frame: pd.DataFrame,
+    ) -> tuple[dict[str, float], dict[str, tuple[str, float]]]:
+        """VIF for each column, plus the strongest absolute correlation partner.
+
+        Rows with any non-finite value are dropped. Constant columns are
+        omitted because their VIF is undefined. The result is empty when
+        fewer than two varying columns remain, or when complete rows do not
+        outnumber the columns (the regressions would be saturated).
+
+        An infinite VIF means the column is a linear combination of the
+        others. Otherwise VIF comes from the diagonal of the inverse
+        correlation matrix, which equals ``1 / (1 - R²)`` from regressing
+        that column on the rest.
+        """
+
+        empty: tuple[dict[str, float], dict[str, tuple[str, float]]] = ({}, {})
+        if frame.shape[1] < 2 or frame.empty:
+            return empty
+        values = frame.to_numpy(dtype=float, copy=True)
+        keep_rows = np.isfinite(values).all(axis=1)
+        values = values[keep_rows]
+        if values.shape[0] < 3:
+            return empty
+        std = values.std(axis=0, ddof=0)
+        keep_cols = std > 0.0
+        values = values[:, keep_cols]
+        names = [str(name) for name, ok in zip(frame.columns, keep_cols) if ok]
+        n_rows, n_cols = values.shape
+        if n_cols < 2 or n_rows < n_cols + 1:
+            return empty
+
+        centered = values - values.mean(axis=0, keepdims=True)
+        scaled = centered / centered.std(axis=0, ddof=0, keepdims=True)
+        corr = (scaled.T @ scaled) / n_rows
+        corr = (corr + corr.T) / 2.0
+        np.fill_diagonal(corr, 1.0)
+
+        partners: dict[str, tuple[str, float]] = {}
+        for index, name in enumerate(names):
+            others = np.abs(corr[index]).copy()
+            others[index] = -1.0
+            partner_at = int(np.argmax(others))
+            partner_r = float(others[partner_at])
+            if partner_r < 0.0:
+                continue
+            partners[name] = (names[partner_at], partner_r)
+
+        vifs = DatasetAuditor._vif_from_correlation(corr, names, scaled)
+        return vifs, partners
+
+    @staticmethod
+    def _vif_from_correlation(
+        corr: np.ndarray,
+        names: list[str],
+        scaled: np.ndarray,
+    ) -> dict[str, float]:
+        """Invert ``corr`` for VIF, falling back to least squares when singular."""
+
+        try:
+            if np.linalg.cond(corr) < _VIF_SINGULAR_CONDITION:
+                diagonal = np.diag(np.linalg.inv(corr))
+                if np.all(np.isfinite(diagonal)) and np.all(diagonal > 0.5):
+                    return {
+                        name: float(max(value, 1.0))
+                        for name, value in zip(names, diagonal)
+                    }
+        except np.linalg.LinAlgError:
+            pass
+
+        result: dict[str, float] = {}
+        for index, name in enumerate(names):
+            target = scaled[:, index]
+            design = np.delete(scaled, index, axis=1)
+            coef, *_ = np.linalg.lstsq(design, target, rcond=None)
+            residual = target - design @ coef
+            ss_res = float(residual @ residual)
+            ss_tot = float(target @ target)
+            if ss_tot <= 1e-18:
+                continue
+            r_squared = 1.0 - ss_res / ss_tot
+            if r_squared >= 1.0 - 1e-8:
+                result[name] = math.inf
+            else:
+                r_squared = min(max(r_squared, 0.0), 1.0 - 1e-15)
+                result[name] = 1.0 / (1.0 - r_squared)
+        return result
 
     @staticmethod
     def _check_redundancy(

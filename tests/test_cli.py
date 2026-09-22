@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -220,6 +221,86 @@ class TestOutlierFlag:
         out = capsys.readouterr().out
         assert "## Outliers" in out
         assert "`score`" in out
+
+
+class TestVifFlag:
+    @pytest.fixture
+    def collinear_csv(self, tmp_path):
+        rng = np.random.default_rng(1)
+        rows = 300
+        x1 = rng.normal(size=rows)
+        x2 = rng.normal(size=rows)
+        path = tmp_path / "collinear.csv"
+        pd.DataFrame(
+            {
+                "x1": x1,
+                "x2": x2,
+                "x3": x1 + x2 + rng.normal(scale=0.05, size=rows),
+            }
+        ).to_csv(path, index=False)
+        return str(path)
+
+    def test_multicollinearity_fails_only_when_enabled(self, collinear_csv, capsys) -> None:
+        assert main(["audit", collinear_csv, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["vif_scores"] == {}
+        assert not [issue for issue in payload["issues"] if issue["check"] == "vif"]
+
+        assert main(["audit", collinear_csv, "--json", "--check-vif"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        findings = [issue for issue in payload["issues"] if issue["check"] == "vif"]
+        assert {issue["column"] for issue in findings} == {"x1", "x2", "x3"}
+        assert payload["vif_scores"]["x1"] is None or payload["vif_scores"]["x1"] >= 10
+
+    def test_lower_threshold_is_wired_through(self, tmp_path, capsys) -> None:
+        rng = np.random.default_rng(3)
+        rows = 800
+        left = rng.normal(size=rows)
+        path = tmp_path / "moderate.csv"
+        pd.DataFrame(
+            {
+                "x": left,
+                "y": 0.9 * left + (1.0 - 0.81) ** 0.5 * rng.normal(size=rows),
+            }
+        ).to_csv(path, index=False)
+        assert main(["audit", str(path), "--json", "--check-vif"]) == 0
+        capsys.readouterr()
+        assert main(
+            ["audit", str(path), "--json", "--check-vif", "--vif-threshold", "5"]
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        findings = [issue for issue in payload["issues"] if issue["check"] == "vif"]
+        assert findings and findings[0]["threshold"] == 5
+
+    def test_check_gate_counts_vif_findings(self, collinear_csv, capsys) -> None:
+        assert main(["check", collinear_csv]) == 0
+        assert main(["check", collinear_csv, "--check-vif"]) == 1
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_vif_flags_are_part_of_the_report_fingerprint(
+        self, collinear_csv, tmp_path
+    ) -> None:
+        first = tmp_path / "first.json"
+        second = tmp_path / "second.json"
+        assert main(["audit", collinear_csv, "--save-json", str(first)]) == 0
+        assert main(
+            ["audit", collinear_csv, "--check-vif", "--save-json", str(second)]
+        ) == 1
+        baseline = json.loads(first.read_text(encoding="utf-8"))
+        enabled = json.loads(second.read_text(encoding="utf-8"))
+        assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
+
+    def test_invalid_threshold_is_a_usage_error(self, collinear_csv, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(["audit", collinear_csv, "--check-vif", "--vif-threshold", "0"])
+        assert exc.value.code == 2
+        assert "positive" in capsys.readouterr().err
+
+    def test_markdown_report_includes_the_vif_section(self, collinear_csv, capsys) -> None:
+        assert main(["audit", collinear_csv, "--check-vif"]) == 1
+        out = capsys.readouterr().out
+        assert "## Variance inflation factors" in out
+        assert "`x1`" in out
 
 
 class TestMissingCooccurrenceFlag:
