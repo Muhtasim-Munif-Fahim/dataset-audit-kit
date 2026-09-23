@@ -11,7 +11,13 @@ import pandas as pd
 from pathlib import Path
 from typing import Sequence
 
-from .core import DEFAULT_VIF_THRESHOLD, AuditReport, DatasetAuditor, ValidationRules
+from .core import (
+    DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+    DEFAULT_VIF_THRESHOLD,
+    AuditReport,
+    DatasetAuditor,
+    ValidationRules,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -309,6 +315,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Common cutoffs: 5 moderate, 10 severe."
         ),
     )
+    audit.add_argument(
+        "--check-label-leakage",
+        action="store_true",
+        help=(
+            "Flag features whose correlation or mutual information with "
+            "--label-column is high"
+        ),
+    )
+    audit.add_argument(
+        "--label-leakage-threshold",
+        type=_positive_unit_interval,
+        default=DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+        help=(
+            "Association with the label at or above which a feature is flagged "
+            f"(default: {DEFAULT_LABEL_LEAKAGE_THRESHOLD:g}). Applies to both "
+            "|Pearson r| and normalized mutual information, each on a 0–1 scale."
+        ),
+    )
 
     audit_glob = subparsers.add_parser(
         "audit-glob",
@@ -388,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = subparsers.add_parser("check", help="Audit a dataset and exit with code 1 on issues (for CI)")
     check.add_argument("data", help="Path to the dataset (.csv, .jsonl, .ndjson, .parquet)")
+    check.add_argument("--label-column", help="Name of the label column", default=None)
     check.add_argument("--rules", help="Path to a JSON file with per-column validation rules", default=None)
     check.add_argument(
         "--profile",
@@ -584,6 +609,24 @@ def build_parser() -> argparse.ArgumentParser:
             "VIF at or above which a numeric column is flagged "
             f"(default: {DEFAULT_VIF_THRESHOLD:g}). "
             "Common cutoffs: 5 moderate, 10 severe."
+        ),
+    )
+    check.add_argument(
+        "--check-label-leakage",
+        action="store_true",
+        help=(
+            "Flag features whose correlation or mutual information with "
+            "--label-column is high"
+        ),
+    )
+    check.add_argument(
+        "--label-leakage-threshold",
+        type=_positive_unit_interval,
+        default=DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+        help=(
+            "Association with the label at or above which a feature is flagged "
+            f"(default: {DEFAULT_LABEL_LEAKAGE_THRESHOLD:g}). Applies to both "
+            "|Pearson r| and normalized mutual information, each on a 0–1 scale."
         ),
     )
 
@@ -921,6 +964,15 @@ def _unit_interval(text: str) -> float:
     return value
 
 
+def _positive_unit_interval(text: str) -> float:
+    """Parse an argparse value in the open-closed interval (0, 1]."""
+
+    value = float(text)
+    if not math.isfinite(value) or not 0.0 < value <= 1.0:
+        raise argparse.ArgumentTypeError("must be greater than 0 and at most 1")
+    return value
+
+
 def _parse_unique_groups(raw: Sequence[str] | None) -> list[list[str]] | None:
     if raw is None:
         return None
@@ -1004,6 +1056,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
         vif_check=getattr(args, "check_vif", False),
         vif_threshold=getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
+        label_leakage_check=getattr(args, "check_label_leakage", False),
+        label_leakage_threshold=getattr(
+            args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
+        ),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -1195,6 +1251,10 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "outlier_max_ratio": getattr(args, "max_outlier_ratio", 0.0),
         "vif_check": getattr(args, "check_vif", False),
         "vif_threshold": getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
+        "label_leakage_check": getattr(args, "check_label_leakage", False),
+        "label_leakage_threshold": getattr(
+            args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
+        ),
     }
     if args.rules:
         fingerprint["rules_sha256"] = hashlib.sha256(
@@ -1345,11 +1405,15 @@ def _cmd_check(args: argparse.Namespace) -> int:
         outlier_max_ratio=getattr(args, "max_outlier_ratio", 0.0),
         vif_check=getattr(args, "check_vif", False),
         vif_threshold=getattr(args, "vif_threshold", DEFAULT_VIF_THRESHOLD),
+        label_leakage_check=getattr(args, "check_label_leakage", False),
+        label_leakage_threshold=getattr(
+            args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
+        ),
     )
     report = auditor.audit_file(
         args.data,
         reference_path=None,
-        label_column=None,
+        label_column=getattr(args, "label_column", None),
         expected_columns=None,
         unique_columns=None,
         encoding=getattr(args, "encoding", None),

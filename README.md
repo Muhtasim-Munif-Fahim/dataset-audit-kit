@@ -16,6 +16,7 @@ Many ML failures start with the data, not the model:
 - a column disappears after a source change
 - missing values silently spike
 - duplicate rows leak into training
+- a feature quietly copies the label
 - labels become imbalanced
 - a new dataset shifts far away from the reference baseline
 
@@ -31,6 +32,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Kolmogorov-Smirnov significance test for numeric distribution drift.
 - Opt-in numeric outlier / extreme-value detection (IQR or z-score).
 - Opt-in multicollinearity audit via variance inflation factors (VIF) on numeric columns.
+- Opt-in label-leakage audit: absolute correlation and normalized mutual information between each feature and the label.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -198,6 +200,42 @@ print(report.vif_scores)
 
 `--check-vif` and `--vif-threshold` are part of the report `config_hash`.
 
+### Label leakage
+
+Features can be scored against the label during `audit` and `check`. The check is off by default, and it does nothing until you name the label with `--label-column`: a strong feature is not a defect until you ask whether it is a copy of the target.
+
+Two scores are reported for every other column, both on a 0–1 scale:
+
+- **|correlation|** — absolute Pearson r. Boolean columns count as 0/1, so a numeric feature against a boolean or 0/1 label is the point-biserial correlation. The score is omitted when either side is not numeric.
+- **mutual information** — the uncertainty coefficient `I(feature; label) / H(label)`, the share of label entropy the feature explains. Numeric columns are split into 10 quantile bins first; a column that already has few distinct values, such as a 0/1 target, is left as-is. Categorical columns use their observed levels.
+
+A warning is raised when either score is at or above `--label-leakage-threshold` (default `0.9`, near-deterministic). Mutual information is how a non-linear or categorical copy is caught when correlation cannot see it. Quantile binning can underestimate some non-monotone numeric relationships; lower the threshold when that is the leak you care about.
+
+The label column itself is not scored. Rows with a missing or non-finite value in the pair are dropped. A categorical column that takes a distinct value on 90% or more of its rows is treated as an identifier and is not given a mutual-information score: a unique key determines any label, so the coefficient would be 1 either way. A numeric copy of the label is still caught by correlation.
+
+```bash
+dataset-audit-kit audit data.csv --label-column target --check-label-leakage
+dataset-audit-kit audit data.csv --label-column target --check-label-leakage --label-leakage-threshold 0.8
+dataset-audit-kit check data.csv --label-column target --check-label-leakage
+```
+
+Findings show up in every report format:
+
+- JSON: `label_leakage_scores` (each column maps to `correlation` and `mutual_information`; `null` means that score does not apply) plus `issues` entries with `check: "label_leakage"`
+- Markdown / HTML: a **Label leakage** table and the issue list
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+auditor = DatasetAuditor(label_leakage_check=True, label_leakage_threshold=0.9)
+report = auditor.audit_file("data.csv", label_column="target")
+print(report.label_leakage_scores)
+```
+
+`--check-label-leakage` and `--label-leakage-threshold` are part of the report `config_hash`. `check` accepts `--label-column` so the same gate can run in CI.
+
 Every `audit` run is stamped with provenance metadata — an `audit_id`, the UTC generation time, and a `config_hash` covering every setting that changes findings (thresholds, sampling, schema expectations, rules file contents). The stamps appear in the JSON report under `meta`, in SARIF run properties (`auditId`, `createdUtc`, `configHash`), and as a footer line in HTML reports, so two saved reports with equal config hashes were produced under the same contract.
 
 ### Exit codes
@@ -347,6 +385,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - Drift score summaries for reference comparisons, including PSI (`{column}__psi`) and KS statistic/p-value.
 - Numeric outlier summaries (IQR fences, counts, and ratios) plus opt-in outlier issues.
 - Opt-in variance inflation factors (`vif_scores`) for numeric multicollinearity.
+- Opt-in label-leakage scores (`label_leakage_scores`): absolute correlation and normalized mutual information with the label.
 - A short issue list with severity, column, and explanation.
 
 ## Roadmap
@@ -364,6 +403,7 @@ Use this when you want a **maintainer-friendly OSS audit layer** before a traini
 - ~~Add --csv flag to shape subcommand~~ ✅ v0.3.4
 - ~~Add --select-columns flag to audit subcommand~~ ✅ v0.3.4
 - ~~Add opt-in VIF multicollinearity check~~ ✅ v0.3.7
+- ~~Add opt-in label-leakage check~~ ✅ v0.3.8
 
 ## Tests
 

@@ -303,6 +303,207 @@ class TestVifFlag:
         assert "`x1`" in out
 
 
+class TestLabelLeakageFlag:
+    @pytest.fixture
+    def coded_csv(self, tmp_path):
+        repeats = 100
+        labels = np.tile(np.array(["cat", "dog", "bird"]), repeats)
+        path = tmp_path / "coded.csv"
+        pd.DataFrame(
+            {
+                "row_id": np.arange(labels.size),
+                "code": np.tile(np.array(["c", "d", "b"]), repeats),
+                "target": labels,
+            }
+        ).to_csv(path, index=False)
+        return str(path)
+
+    @pytest.fixture
+    def moderate_csv(self, tmp_path):
+        rng = np.random.default_rng(0)
+        rows = 1000
+        label = np.array([0.0, 1.0] * (rows // 2))
+        path = tmp_path / "moderate.csv"
+        pd.DataFrame(
+            {"score": label + rng.normal(scale=0.32, size=rows), "target": label}
+        ).to_csv(path, index=False)
+        return str(path)
+
+    def test_categorical_leak_fails_only_when_enabled(self, coded_csv, capsys) -> None:
+        assert main(["audit", coded_csv, "--json", "--label-column", "target"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["label_leakage_scores"] == {}
+        assert not [
+            issue for issue in payload["issues"] if issue["check"] == "label_leakage"
+        ]
+
+        assert main(["audit", coded_csv, "--json", "--check-label-leakage"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["label_leakage_scores"] == {}
+
+        assert (
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--json",
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                ]
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        findings = [
+            issue for issue in payload["issues"] if issue["check"] == "label_leakage"
+        ]
+        assert [issue["column"] for issue in findings] == ["code"]
+        assert payload["label_leakage_scores"]["code"]["mutual_information"] == 1.0
+        assert payload["label_leakage_scores"]["code"]["correlation"] is None
+
+    def test_lower_threshold_is_wired_through(self, moderate_csv, capsys) -> None:
+        assert (
+            main(
+                [
+                    "audit",
+                    moderate_csv,
+                    "--json",
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            main(
+                [
+                    "audit",
+                    moderate_csv,
+                    "--json",
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                    "--label-leakage-threshold",
+                    "0.8",
+                ]
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        findings = [
+            issue for issue in payload["issues"] if issue["check"] == "label_leakage"
+        ]
+        assert findings and findings[0]["column"] == "score"
+        assert findings[0]["threshold"] == 0.8
+
+    def test_check_gate_counts_leakage_findings(self, coded_csv, capsys) -> None:
+        assert main(["check", coded_csv, "--label-column", "target"]) == 0
+        assert main(["check", coded_csv, "--check-label-leakage"]) == 0
+        assert (
+            main(
+                [
+                    "check",
+                    coded_csv,
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                ]
+            )
+            == 1
+        )
+        assert "[FAIL]" in capsys.readouterr().out
+
+    def test_leakage_flags_are_part_of_the_report_fingerprint(
+        self, coded_csv, tmp_path
+    ) -> None:
+        first = tmp_path / "first.json"
+        second = tmp_path / "second.json"
+        third = tmp_path / "third.json"
+        assert (
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--label-column",
+                    "target",
+                    "--save-json",
+                    str(first),
+                ]
+            )
+            == 0
+        )
+        assert (
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                    "--save-json",
+                    str(second),
+                ]
+            )
+            == 1
+        )
+        assert (
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                    "--label-leakage-threshold",
+                    "0.8",
+                    "--save-json",
+                    str(third),
+                ]
+            )
+            == 1
+        )
+        baseline = json.loads(first.read_text(encoding="utf-8"))
+        enabled = json.loads(second.read_text(encoding="utf-8"))
+        lowered = json.loads(third.read_text(encoding="utf-8"))
+        assert baseline["meta"]["config_hash"] != enabled["meta"]["config_hash"]
+        assert enabled["meta"]["config_hash"] != lowered["meta"]["config_hash"]
+
+    @pytest.mark.parametrize("bad", ["0", "1.1", "-0.2"])
+    def test_invalid_threshold_is_a_usage_error(self, coded_csv, capsys, bad: str) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--check-label-leakage",
+                    "--label-leakage-threshold",
+                    bad,
+                ]
+            )
+        assert exc.value.code == 2
+        assert "at most 1" in capsys.readouterr().err
+
+    def test_markdown_report_includes_the_leakage_section(self, coded_csv, capsys) -> None:
+        assert (
+            main(
+                [
+                    "audit",
+                    coded_csv,
+                    "--label-column",
+                    "target",
+                    "--check-label-leakage",
+                ]
+            )
+            == 1
+        )
+        out = capsys.readouterr().out
+        assert "## Label leakage" in out
+        assert "`code`" in out
+
+
 class TestMissingCooccurrenceFlag:
     @pytest.fixture
     def gappy_csv(self, tmp_path):

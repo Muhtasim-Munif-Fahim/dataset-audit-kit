@@ -54,6 +54,20 @@ DEFAULT_KS_THRESHOLD = 0.0
 #: the redundancy gate: |r| = 0.95 implies VIF = 1 / (1 - r²) ≈ 10.26.
 DEFAULT_VIF_THRESHOLD = 10.0
 
+#: Association with the label at or above which a feature is flagged for
+#: leakage. Both absolute Pearson correlation and the uncertainty coefficient
+#: (mutual information divided by label entropy) sit on [0, 1]. 0.9 means the
+#: feature nearly determines the label.
+DEFAULT_LABEL_LEAKAGE_THRESHOLD = 0.9
+
+#: Quantile bins used to discretize a numeric column before mutual information.
+_LABEL_LEAKAGE_BINS = 10
+
+#: A categorical feature with a distinct level on this share of rows (or more)
+#: is an identifier: discrete mutual information is then 1 for any label, so
+#: the score is left unset. Numeric copies are still caught by correlation.
+_LABEL_LEAKAGE_MAX_LEVEL_RATIO = 0.9
+
 #: Condition number above which the correlation matrix is treated as
 #: singular and VIF falls back to per-column least squares.
 _VIF_SINGULAR_CONDITION = 1e12
@@ -130,6 +144,7 @@ _AUDIT_PHASES = (
     "category_share",
     "redundancy",
     "vif",
+    "label leakage",
 )
 
 
@@ -212,6 +227,38 @@ def _sorted_vif_items(
     def sort_key(item: tuple[str, float | None]) -> tuple[float, str]:
         name, score = item
         magnitude = float("inf") if score is None else float(score)
+        return (-magnitude, name)
+
+    return sorted(scores.items(), key=sort_key)
+
+
+def _format_association(value: object) -> str:
+    """Render a label-association score, using ``n/a`` when it does not apply."""
+
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return "n/a"
+    return f"{number:.3f}"
+
+
+def _sorted_leakage_items(
+    scores: dict[str, dict[str, float | None]],
+) -> list[tuple[str, dict[str, float | None]]]:
+    """Order leakage rows from the strongest label association to the weakest."""
+
+    def sort_key(item: tuple[str, dict[str, float | None]]) -> tuple[float, str]:
+        name, payload = item
+        values = [
+            float(payload[key])
+            for key in ("correlation", "mutual_information")
+            if payload.get(key) is not None
+        ]
+        magnitude = max(values) if values else -1.0
         return (-magnitude, name)
 
     return sorted(scores.items(), key=sort_key)
@@ -942,6 +989,11 @@ class AuditReport:
     #: Variance inflation factor per numeric column. Empty unless the opt-in
     #: VIF check ran. ``None`` means perfect collinearity (infinite VIF).
     vif_scores: dict[str, float | None] = field(default_factory=dict)
+    #: Per-feature association with the label. Empty unless the opt-in label
+    #: leakage check ran. ``correlation`` is absolute Pearson r for numeric
+    #: pairs; ``mutual_information`` is the fraction of label entropy the
+    #: feature explains. ``None`` means that score does not apply.
+    label_leakage_scores: dict[str, dict[str, float | None]] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -1012,6 +1064,7 @@ class AuditReport:
             "rule_cooccurrence": self.rule_cooccurrence(),
             "outlier_summary": self.outlier_summary(),
             "vif_scores": self.vif_scores,
+            "label_leakage_scores": self.label_leakage_scores,
         }
         if any((self.audit_id, self.created_utc, self.config_hash)):
             payload["meta"] = {
@@ -1260,6 +1313,14 @@ class AuditReport:
             lines.extend(["", "## Variance inflation factors"])
             for column, score in _sorted_vif_items(self.vif_scores):
                 lines.append(f"- `{column}`: {_format_vif(score)}")
+
+        if self.label_leakage_scores:
+            lines.extend(["", "## Label leakage"])
+            for column, score in _sorted_leakage_items(self.label_leakage_scores):
+                lines.append(
+                    f"- `{column}`: |r|={_format_association(score.get('correlation'))}, "
+                    f"mutual information={_format_association(score.get('mutual_information'))}"
+                )
 
         if self.issues:
             lines.extend(["", "## Issues"])
@@ -1513,6 +1574,23 @@ class AuditReport:
                 "</tbody></table>",
             ])
 
+        if self.label_leakage_scores:
+            leakage_html_rows = [
+                "<tr>"
+                f"<td>{esc(column)}</td>"
+                f"<td>{esc(_format_association(score.get('correlation')))}</td>"
+                f"<td>{esc(_format_association(score.get('mutual_information')))}</td>"
+                "</tr>"
+                for column, score in _sorted_leakage_items(self.label_leakage_scores)
+            ]
+            sections.extend([
+                "<h2>Label leakage</h2>",
+                "<table><thead><tr><th>Column</th><th>|correlation|</th>"
+                "<th>Mutual information</th></tr></thead><tbody>",
+                *leakage_html_rows,
+                "</tbody></table>",
+            ])
+
         rule_cooccurrence = self.rule_cooccurrence()
         if rule_cooccurrence:
             cooccurrence_rows: list[str] = []
@@ -1643,6 +1721,14 @@ class AuditReport:
                 suggestion["description"] = (
                     f"Drop '{col}' or another numeric column in the collinear "
                     "set before fitting a linear model."
+                )
+            elif issue.check == "label_leakage":
+                col = issue.column or ""
+                suggestion["action"] = "drop_leaking_feature"
+                suggestion["code"] = f"df = df.drop(columns=['{col}'])"
+                suggestion["description"] = (
+                    f"Drop '{col}' before training; it tracks the label closely "
+                    "enough to leak the target into the features."
                 )
             else:
                 suggestion["action"] = "manual_review"
@@ -3133,6 +3219,8 @@ class DatasetAuditor:
         outlier_max_ratio: float = 0.0,
         vif_check: bool = False,
         vif_threshold: float = DEFAULT_VIF_THRESHOLD,
+        label_leakage_check: bool = False,
+        label_leakage_threshold: float = DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -3221,6 +3309,13 @@ class DatasetAuditor:
             or float(vif_threshold) <= 0.0
         ):
             raise ValueError("vif_threshold must be a positive finite number")
+        if (
+            isinstance(label_leakage_threshold, bool)
+            or not isinstance(label_leakage_threshold, (int, float))
+            or not math.isfinite(float(label_leakage_threshold))
+            or not 0.0 < float(label_leakage_threshold) <= 1.0
+        ):
+            raise ValueError("label_leakage_threshold must be a number in (0, 1]")
         validated_weights: dict[str, float] = {}
         for check, weight in (severity_weights or {}).items():
             if (
@@ -3276,6 +3371,8 @@ class DatasetAuditor:
         self.outlier_max_ratio = float(outlier_max_ratio)
         self.vif_check = bool(vif_check)
         self.vif_threshold = float(vif_threshold)
+        self.label_leakage_check = bool(label_leakage_check)
+        self.label_leakage_threshold = float(label_leakage_threshold)
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -3496,6 +3593,13 @@ class DatasetAuditor:
         if self.vif_check:
             vif_scores = self._check_vif(data, issues, label_column=label_column)
 
+        progress.advance("label leakage")
+        label_leakage_scores: dict[str, dict[str, float | None]] = {}
+        if self.label_leakage_check:
+            label_leakage_scores = self._check_label_leakage(
+                data, issues, label_column=label_column
+            )
+
         progress.close()
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
@@ -3512,6 +3616,7 @@ class DatasetAuditor:
             drift_scores=all_drift_scores,
             issues=issues,
             vif_scores=vif_scores,
+            label_leakage_scores=label_leakage_scores,
         )
         report.risk_score = self._risk_score(issues)
         return report
@@ -5562,6 +5667,276 @@ class DatasetAuditor:
                 )
             )
         return reported
+
+    def _check_label_leakage(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        label_column: str | None = None,
+    ) -> dict[str, dict[str, float | None]]:
+        """Flag features that are highly associated with the label.
+
+        Opt-in because a strong feature is not always a defect: the same
+        signal is the point of the model until it is a copy of the target.
+        Two scores are reported, both on ``[0, 1]``:
+
+        * ``correlation`` — absolute Pearson r, including the point-biserial
+          case of a numeric feature and a boolean or 0/1 label. Unset when
+          either side is not numeric.
+        * ``mutual_information`` — the uncertainty coefficient
+          ``I(feature; label) / H(label)``, the share of label entropy the
+          feature explains. Numeric columns are split into quantile bins
+          first. Unset for constants and for categorical columns that are
+          distinct on nearly every row (a unique key determines any label).
+
+        A warning is raised when either score is at or above
+        ``label_leakage_threshold``. Rows with a missing or non-finite value
+        in the pair are dropped. The label column itself is not scored.
+        """
+
+        if label_column is None:
+            return {}
+        label_name = str(label_column)
+        label_pos: int | None = None
+        for position, column in enumerate(data.columns):
+            if str(column) == label_name:
+                label_pos = position
+                break
+        if label_pos is None:
+            return {}
+
+        label_raw = data.iloc[:, label_pos]
+        label_kind = DatasetAuditor._leakage_kind(label_raw)
+        if label_kind is None:
+            return {}
+
+        reported: dict[str, dict[str, float | None]] = {}
+        seen: set[str] = set()
+        threshold = self.label_leakage_threshold
+        for position, column in enumerate(data.columns):
+            name = str(column)
+            if position == label_pos or name == label_name or name in seen:
+                continue
+            feature_raw = data.iloc[:, position]
+            feature_kind = DatasetAuditor._leakage_kind(feature_raw)
+            if feature_kind is None:
+                continue
+            seen.add(name)
+            scored = DatasetAuditor._label_association(
+                feature_raw,
+                label_raw,
+                feature_numeric=feature_kind == "numeric",
+                label_numeric=label_kind == "numeric",
+            )
+            if scored is None:
+                continue
+            correlation, mutual_information = scored
+            stored_correlation = (
+                None if correlation is None else round(float(correlation), 6)
+            )
+            stored_mi = (
+                None
+                if mutual_information is None
+                else round(float(mutual_information), 6)
+            )
+            if stored_correlation is None and stored_mi is None:
+                continue
+            reported[name] = {
+                "correlation": stored_correlation,
+                "mutual_information": stored_mi,
+            }
+            triggering = [
+                value
+                for value in (stored_correlation, stored_mi)
+                if value is not None and value >= threshold
+            ]
+            if not triggering:
+                continue
+            details: list[str] = []
+            if stored_correlation is not None:
+                details.append(f"|r|={stored_correlation:.3f}")
+            if stored_mi is not None:
+                details.append(f"mutual information={stored_mi:.3f}")
+            issues.append(
+                AuditIssue(
+                    check="label_leakage",
+                    severity="warning",
+                    message=(
+                        f"Feature '{name}' is highly associated with label "
+                        f"'{label_name}' ({', '.join(details)}), at or above "
+                        f"the {threshold:g} threshold."
+                    ),
+                    column=name,
+                    observed=round(max(triggering), 4),
+                    threshold=threshold,
+                )
+            )
+        return reported
+
+    @staticmethod
+    def _leakage_kind(series: pd.Series) -> str | None:
+        """Classify a column for the label-leakage check.
+
+        ``numeric`` covers booleans, which are scored as 0/1. Datetimes and
+        other types that are neither numeric nor categorical are skipped.
+        """
+
+        if (
+            pd.api.types.is_datetime64_any_dtype(series)
+            or pd.api.types.is_timedelta64_dtype(series)
+            or pd.api.types.is_complex_dtype(series)
+        ):
+            return None
+        if pd.api.types.is_bool_dtype(series) or pd.api.types.is_numeric_dtype(series):
+            return "numeric"
+        if (
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or isinstance(series.dtype, pd.CategoricalDtype)
+        ):
+            return "categorical"
+        return None
+
+    @staticmethod
+    def _label_association(
+        feature: pd.Series,
+        label: pd.Series,
+        *,
+        feature_numeric: bool,
+        label_numeric: bool,
+    ) -> tuple[float | None, float | None] | None:
+        """Absolute correlation and normalized mutual information for one pair.
+
+        Returns ``None`` when fewer than three complete rows remain. Each
+        score is ``None`` when it is undefined for that pair.
+        """
+
+        feature = feature.reset_index(drop=True)
+        label = label.reset_index(drop=True)
+        feature_values = DatasetAuditor._leakage_numeric_values(feature) if feature_numeric else None
+        label_values = DatasetAuditor._leakage_numeric_values(label) if label_numeric else None
+        mask = feature.notna().to_numpy() & label.notna().to_numpy()
+        if feature_values is not None:
+            mask &= np.isfinite(feature_values)
+        if label_values is not None:
+            mask &= np.isfinite(label_values)
+        if int(mask.sum()) < 3:
+            return None
+
+        feature = feature[mask]
+        label = label[mask]
+        correlation: float | None = None
+        if feature_values is not None and label_values is not None:
+            correlation = DatasetAuditor._abs_pearson(
+                feature_values[mask], label_values[mask]
+            )
+        mutual_information = DatasetAuditor._uncertainty_coefficient(
+            DatasetAuditor._label_leakage_codes(feature, numeric=feature_numeric),
+            DatasetAuditor._label_leakage_codes(label, numeric=label_numeric),
+        )
+        return correlation, mutual_information
+
+    @staticmethod
+    def _leakage_numeric_values(series: pd.Series) -> np.ndarray:
+        """Float view of a numeric column, with booleans coded as 0/1."""
+
+        if pd.api.types.is_bool_dtype(series):
+            return series.astype(float).to_numpy(dtype=float)
+        return pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+
+    @staticmethod
+    def _label_leakage_codes(values: pd.Series, *, numeric: bool) -> np.ndarray:
+        """Integer codes for mutual information.
+
+        Categorical and boolean columns keep their observed levels. Numeric
+        columns with more than :data:`_LABEL_LEAKAGE_BINS` distinct values
+        are split into that many quantile bins; fewer levels are left as-is
+        so a 0/1 target is not re-binned.
+        """
+
+        if not numeric or pd.api.types.is_bool_dtype(values):
+            codes, _ = pd.factorize(values, sort=False)
+            return np.asarray(codes, dtype=np.int64)
+        array = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+        if int(np.unique(array).size) <= _LABEL_LEAKAGE_BINS:
+            codes, _ = pd.factorize(array, sort=False)
+            return np.asarray(codes, dtype=np.int64)
+        binned = pd.qcut(array, q=_LABEL_LEAKAGE_BINS, duplicates="drop")
+        codes, _ = pd.factorize(binned, sort=False)
+        return np.asarray(codes, dtype=np.int64)
+
+    @staticmethod
+    def _abs_pearson(left: np.ndarray, right: np.ndarray) -> float | None:
+        """Absolute population Pearson correlation, or ``None`` if undefined."""
+
+        if left.size < 3 or left.size != right.size:
+            return None
+        left = np.asarray(left, dtype=float)
+        right = np.asarray(right, dtype=float)
+        left_std = float(left.std(ddof=0))
+        right_std = float(right.std(ddof=0))
+        if left_std <= 0.0 or right_std <= 0.0:
+            return None
+        left_z = (left - float(left.mean())) / left_std
+        right_z = (right - float(right.mean())) / right_std
+        value = abs(float(np.dot(left_z, right_z) / left.size))
+        if not math.isfinite(value):
+            return None
+        return float(min(value, 1.0))
+
+    @staticmethod
+    def _uncertainty_coefficient(
+        feature_codes: np.ndarray, label_codes: np.ndarray
+    ) -> float | None:
+        """Share of label entropy explained by the feature, in ``[0, 1]``.
+
+        This is ``I(feature; label) / H(label)``. It is ``None`` when the
+        label does not vary, or when the feature has a distinct level on at
+        least :data:`_LABEL_LEAKAGE_MAX_LEVEL_RATIO` of the rows: a near-key
+        determines every label, so the coefficient would be 1 for an
+        identifier as well as for a real leak.
+        """
+
+        feature_codes = np.asarray(feature_codes)
+        label_codes = np.asarray(label_codes)
+        n = int(feature_codes.size)
+        if n < 3 or int(label_codes.size) != n:
+            return None
+        _, feature_inv = np.unique(feature_codes, return_inverse=True)
+        _, label_inv = np.unique(label_codes, return_inverse=True)
+        feature_levels = int(feature_inv.max()) + 1
+        label_levels = int(label_inv.max()) + 1
+        if feature_levels < 2 or label_levels < 2:
+            return None
+        if feature_levels / n >= _LABEL_LEAKAGE_MAX_LEVEL_RATIO:
+            return None
+        joint = np.zeros((feature_levels, label_levels), dtype=float)
+        np.add.at(joint, (feature_inv, label_inv), 1.0)
+        joint /= n
+        px = joint.sum(axis=1, keepdims=True)
+        py = joint.sum(axis=0, keepdims=True)
+        py_nz = py.ravel()
+        py_nz = py_nz[py_nz > 0.0]
+        label_entropy = float(-(py_nz * np.log(py_nz)).sum())
+        if label_entropy <= 1e-15:
+            return None
+        mask = joint > 0.0
+        px_full = np.broadcast_to(px, joint.shape)
+        py_full = np.broadcast_to(py, joint.shape)
+        mutual_information = float(
+            (
+                joint[mask]
+                * (
+                    np.log(joint[mask])
+                    - np.log(px_full[mask])
+                    - np.log(py_full[mask])
+                )
+            ).sum()
+        )
+        if not math.isfinite(mutual_information) or mutual_information <= 0.0:
+            return 0.0
+        return float(min(max(mutual_information / label_entropy, 0.0), 1.0))
 
     @staticmethod
     def _variance_inflation_factors(
