@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataset-audit-kit"
-version = "0.3.7"
-description = "A lightweight dataset validation toolkit for schema, missingness, drift, and multicollinearity checks."
+version = "0.3.8"
+description = "A lightweight dataset validation toolkit for schema, missingness, drift, multicollinearity, and label-leakage checks."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
