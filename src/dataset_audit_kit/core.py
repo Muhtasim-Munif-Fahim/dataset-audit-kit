@@ -59,6 +59,7 @@ DEFAULT_VIF_THRESHOLD = 10.0
 #: (mutual information divided by label entropy) sit on [0, 1]. 0.9 means the
 #: feature nearly determines the label.
 DEFAULT_LABEL_LEAKAGE_THRESHOLD = 0.9
+DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD = 0.99
 
 #: Quantile bins used to discretize a numeric column before mutual information.
 _LABEL_LEAKAGE_BINS = 10
@@ -145,6 +146,7 @@ _AUDIT_PHASES = (
     "redundancy",
     "vif",
     "label leakage",
+    "target encoding leakage",
 )
 
 
@@ -994,6 +996,12 @@ class AuditReport:
     #: pairs; ``mutual_information`` is the fraction of label entropy the
     #: feature explains. ``None`` means that score does not apply.
     label_leakage_scores: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    #: Numeric columns that match in-sample categorical target means. Empty
+    #: unless the opt-in target-encoding leakage check ran. Keys are
+    #: ``"{feature}|{categorical}"`` with match correlation and MAE.
+    target_encoding_leakage_scores: dict[str, dict[str, float | None]] = field(
+        default_factory=dict
+    )
 
     @property
     def status(self) -> str:
@@ -1065,6 +1073,7 @@ class AuditReport:
             "outlier_summary": self.outlier_summary(),
             "vif_scores": self.vif_scores,
             "label_leakage_scores": self.label_leakage_scores,
+            "target_encoding_leakage_scores": self.target_encoding_leakage_scores,
         }
         if any((self.audit_id, self.created_utc, self.config_hash)):
             payload["meta"] = {
@@ -1320,6 +1329,21 @@ class AuditReport:
                 lines.append(
                     f"- `{column}`: |r|={_format_association(score.get('correlation'))}, "
                     f"mutual information={_format_association(score.get('mutual_information'))}"
+                )
+
+        if self.target_encoding_leakage_scores:
+            lines.extend(["", "## Target-encoding leakage"])
+            items = sorted(
+                self.target_encoding_leakage_scores.items(),
+                key=lambda item: (
+                    -(item[1].get("match_correlation") or 0.0),
+                    item[0],
+                ),
+            )
+            for key, score in items:
+                lines.append(
+                    f"- `{key}`: match |r|={_format_association(score.get('match_correlation'))}, "
+                    f"MAE={_format_association(score.get('match_mae'))}"
                 )
 
         if self.issues:
@@ -1729,6 +1753,18 @@ class AuditReport:
                 suggestion["description"] = (
                     f"Drop '{col}' before training; it tracks the label closely "
                     "enough to leak the target into the features."
+                )
+            elif issue.check == "target_encoding_leakage":
+                col = issue.column or ""
+                suggestion["action"] = "refit_target_encoding_out_of_fold"
+                suggestion["code"] = (
+                    f"# Recompute target encoding for '{col}' with out-of-fold "
+                    "means only\n"
+                    "# (e.g. leave-one-out or K-fold) before joining it back."
+                )
+                suggestion["description"] = (
+                    f"'{col}' matches in-sample category target means; refit "
+                    "with out-of-fold / leave-one-out encodings to avoid leakage."
                 )
             else:
                 suggestion["action"] = "manual_review"
@@ -3221,6 +3257,8 @@ class DatasetAuditor:
         vif_threshold: float = DEFAULT_VIF_THRESHOLD,
         label_leakage_check: bool = False,
         label_leakage_threshold: float = DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+        target_encoding_leakage_check: bool = False,
+        target_encoding_leakage_threshold: float = DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     ) -> None:
         if not 0.0 <= redundancy_threshold <= 1.0:
             raise ValueError("redundancy_threshold must be between 0 and 1")
@@ -3316,6 +3354,15 @@ class DatasetAuditor:
             or not 0.0 < float(label_leakage_threshold) <= 1.0
         ):
             raise ValueError("label_leakage_threshold must be a number in (0, 1]")
+        if (
+            isinstance(target_encoding_leakage_threshold, bool)
+            or not isinstance(target_encoding_leakage_threshold, (int, float))
+            or not math.isfinite(float(target_encoding_leakage_threshold))
+            or not 0.0 < float(target_encoding_leakage_threshold) <= 1.0
+        ):
+            raise ValueError(
+                "target_encoding_leakage_threshold must be a number in (0, 1]"
+            )
         validated_weights: dict[str, float] = {}
         for check, weight in (severity_weights or {}).items():
             if (
@@ -3373,6 +3420,10 @@ class DatasetAuditor:
         self.vif_threshold = float(vif_threshold)
         self.label_leakage_check = bool(label_leakage_check)
         self.label_leakage_threshold = float(label_leakage_threshold)
+        self.target_encoding_leakage_check = bool(target_encoding_leakage_check)
+        self.target_encoding_leakage_threshold = float(
+            target_encoding_leakage_threshold
+        )
 
     def _progress_reporter(self, data: pd.DataFrame) -> "_Progress":
         enabled = (
@@ -3600,6 +3651,13 @@ class DatasetAuditor:
                 data, issues, label_column=label_column
             )
 
+        progress.advance("target encoding leakage")
+        target_encoding_leakage_scores: dict[str, dict[str, float | None]] = {}
+        if self.target_encoding_leakage_check:
+            target_encoding_leakage_scores = self._check_target_encoding_leakage(
+                data, issues, label_column=label_column
+            )
+
         progress.close()
 
         all_drift_scores = {**drift_scores, **correlation_drift_scores}
@@ -3617,6 +3675,7 @@ class DatasetAuditor:
             issues=issues,
             vif_scores=vif_scores,
             label_leakage_scores=label_leakage_scores,
+            target_encoding_leakage_scores=target_encoding_leakage_scores,
         )
         report.risk_score = self._risk_score(issues)
         return report
@@ -5772,6 +5831,118 @@ class DatasetAuditor:
                     threshold=threshold,
                 )
             )
+        return reported
+
+
+    def _check_target_encoding_leakage(
+        self,
+        data: pd.DataFrame,
+        issues: list[AuditIssue],
+        *,
+        label_column: str | None = None,
+    ) -> dict[str, dict[str, float | None]]:
+        """Flag numeric features that match in-sample categorical target means.
+
+        Classic target encoding replaces a category with the mean of the label
+        over rows that share that category. When those means are fit on the
+        full frame (including each row's own label), the encoded column leaks
+        the target into the features. This opt-in check looks for numeric
+        columns whose values closely track the *in-sample* category means of
+        the label for some categorical column.
+
+        For every categorical column ``C`` and numeric feature ``F`` the check
+        builds the map ``mean(label | C)`` on all non-missing rows, projects
+        it back onto each row, and scores Pearson correlation and MAE against
+        ``F``. A warning is raised when the absolute correlation is at or
+        above ``target_encoding_leakage_threshold``. Categories with fewer
+        than two rows are skipped when forming means. The label column and
+        constant numeric columns are ignored.
+        """
+
+        if label_column is None:
+            return {}
+        label_name = str(label_column)
+        if label_name not in {str(c) for c in data.columns}:
+            return {}
+
+        label_raw = data[label_name]
+        if not (
+            pd.api.types.is_numeric_dtype(label_raw)
+            or pd.api.types.is_bool_dtype(label_raw)
+        ):
+            # Binary / numeric labels only; multiclass strings need a prior
+            # encoding step that this check does not invent.
+            return {}
+
+        label = pd.to_numeric(label_raw, errors="coerce")
+        threshold = self.target_encoding_leakage_threshold
+        categoricals: list[str] = []
+        numerics: list[str] = []
+        for column in data.columns:
+            name = str(column)
+            if name == label_name:
+                continue
+            series = data[column]
+            if pd.api.types.is_datetime64_any_dtype(series) or pd.api.types.is_timedelta64_dtype(series):
+                continue
+            if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+                numerics.append(name)
+            else:
+                # object / string / categorical
+                nunique = int(series.nunique(dropna=True))
+                if 2 <= nunique < max(3, int(0.5 * len(series))):
+                    categoricals.append(name)
+
+        reported: dict[str, dict[str, float | None]] = {}
+        for cat_name in categoricals:
+            cats = data[cat_name]
+            frame = pd.DataFrame({"c": cats, "y": label}).dropna()
+            if len(frame) < 4:
+                continue
+            counts = frame.groupby("c", sort=False)["y"].size()
+            means = frame.groupby("c", sort=False)["y"].mean()
+            usable = counts[counts >= 2].index
+            if len(usable) < 2:
+                continue
+            means = means.loc[usable]
+            mapped = cats.map(means)
+            for feat_name in numerics:
+                feature = pd.to_numeric(data[feat_name], errors="coerce")
+                paired = pd.DataFrame({"f": feature, "m": mapped}).dropna()
+                if len(paired) < 4:
+                    continue
+                if float(paired["f"].std(ddof=0)) == 0.0:
+                    continue
+                if float(paired["m"].std(ddof=0)) == 0.0:
+                    continue
+                corr = float(paired["f"].corr(paired["m"]))
+                if corr != corr:  # NaN
+                    continue
+                mae = float((paired["f"] - paired["m"]).abs().mean())
+                key = f"{feat_name}|{cat_name}"
+                stored = {
+                    "match_correlation": round(abs(corr), 6),
+                    "match_mae": round(mae, 6),
+                }
+                reported[key] = stored
+                if abs(corr) < threshold:
+                    continue
+                issues.append(
+                    AuditIssue(
+                        check="target_encoding_leakage",
+                        severity="warning",
+                        message=(
+                            f"Numeric feature '{feat_name}' matches in-sample "
+                            f"target means of categorical '{cat_name}' "
+                            f"(|r|={abs(corr):.3f}, MAE={mae:.4g}) at or above "
+                            f"the {threshold:g} threshold — possible target-"
+                            f"encoding leakage against label '{label_name}'."
+                        ),
+                        column=feat_name,
+                        observed=round(abs(corr), 4),
+                        threshold=threshold,
+                    )
+                )
         return reported
 
     @staticmethod

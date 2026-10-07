@@ -32,6 +32,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Kolmogorov-Smirnov significance test for numeric distribution drift.
 - Opt-in numeric outlier / extreme-value detection (IQR or z-score).
 - Opt-in multicollinearity audit via variance inflation factors (VIF) on numeric columns.
+- **Target-encoding leakage** (opt-in): flag numeric features that match in-sample categorical target means — a common leakage from fitting mean encodings on the full frame.
 - Opt-in label-leakage audit: absolute correlation and normalized mutual information between each feature and the label.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
