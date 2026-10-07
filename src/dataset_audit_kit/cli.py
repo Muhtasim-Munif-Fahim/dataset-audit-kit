@@ -13,6 +13,7 @@ from typing import Sequence
 
 from .core import (
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+    DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     DEFAULT_VIF_THRESHOLD,
     AuditReport,
     DatasetAuditor,
@@ -334,6 +335,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    audit.add_argument(
+        "--check-target-encoding-leakage",
+        action="store_true",
+        help=(
+            "Flag numeric features that match in-sample categorical target "
+            "means (possible target-encoding leakage)"
+        ),
+    )
+    audit.add_argument(
+        "--target-encoding-leakage-threshold",
+        type=_positive_unit_interval,
+        default=DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
+        help=(
+            "Absolute correlation with in-sample category target means at or "
+            "above which a feature is flagged "
+            f"(default: {DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD:g})."
+        ),
+    )
+
     audit_glob = subparsers.add_parser(
         "audit-glob",
         help="Audit every dataset matching a glob pattern and print a rollup",
@@ -627,6 +647,25 @@ def build_parser() -> argparse.ArgumentParser:
             "Association with the label at or above which a feature is flagged "
             f"(default: {DEFAULT_LABEL_LEAKAGE_THRESHOLD:g}). Applies to both "
             "|Pearson r| and normalized mutual information, each on a 0–1 scale."
+        ),
+    )
+
+    check.add_argument(
+        "--check-target-encoding-leakage",
+        action="store_true",
+        help=(
+            "Flag numeric features that match in-sample categorical target "
+            "means (possible target-encoding leakage)"
+        ),
+    )
+    check.add_argument(
+        "--target-encoding-leakage-threshold",
+        type=_positive_unit_interval,
+        default=DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
+        help=(
+            "Absolute correlation with in-sample category target means at or "
+            "above which a feature is flagged "
+            f"(default: {DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD:g})."
         ),
     )
 
@@ -1060,6 +1099,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         label_leakage_threshold=getattr(
             args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
         ),
+        target_encoding_leakage_check=getattr(
+            args, "check_target_encoding_leakage", False
+        ),
+        target_encoding_leakage_threshold=getattr(
+            args,
+            "target_encoding_leakage_threshold",
+            DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
+        ),
     )
 
     select_columns = _parse_columns(args.select_columns)
@@ -1255,6 +1302,14 @@ def _stamp_report(report: AuditReport, args: argparse.Namespace) -> None:
         "label_leakage_threshold": getattr(
             args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
         ),
+        "target_encoding_leakage_check": getattr(
+            args, "check_target_encoding_leakage", False
+        ),
+        "target_encoding_leakage_threshold": getattr(
+            args,
+            "target_encoding_leakage_threshold",
+            DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
+        ),
     }
     if args.rules:
         fingerprint["rules_sha256"] = hashlib.sha256(
@@ -1408,6 +1463,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
         label_leakage_check=getattr(args, "check_label_leakage", False),
         label_leakage_threshold=getattr(
             args, "label_leakage_threshold", DEFAULT_LABEL_LEAKAGE_THRESHOLD
+        ),
+        target_encoding_leakage_check=getattr(
+            args, "check_target_encoding_leakage", False
+        ),
+        target_encoding_leakage_threshold=getattr(
+            args,
+            "target_encoding_leakage_threshold",
+            DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
         ),
     )
     report = auditor.audit_file(
