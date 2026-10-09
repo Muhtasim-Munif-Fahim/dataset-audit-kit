@@ -419,3 +419,21 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and pull request guidance
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+
+## Benford's law report
+
+`DatasetAuditor.benford_law_report(df)` compares each numeric column's
+leading-digit distribution to Benford's `log10(1 + 1/d)` probabilities
+with a Pearson chi-square test. Low p-values flag columns that deviate
+from the law (useful for fraud / fabricated-number screens).
+
+```python
+from dataset_audit_kit import DatasetAuditor
+import pandas as pd
+
+report_rows = DatasetAuditor().benford_law_report(df, min_samples=50)
+for row in report_rows:
+    if row["suspect"]:
+        print(row["column"], row["p_value"], row["mean_abs_deviation"])
+```
