@@ -61,6 +61,12 @@ DEFAULT_VIF_THRESHOLD = 10.0
 DEFAULT_LABEL_LEAKAGE_THRESHOLD = 0.9
 DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD = 0.99
 
+DEFAULT_BENFORD_MIN_SAMPLES = 50
+DEFAULT_BENFORD_PVALUE = 0.05
+BENFORD_EXPECTED = tuple(
+    math.log10(1.0 + 1.0 / d) for d in range(1, 10)
+)
+
 #: Quantile bins used to discretize a numeric column before mutual information.
 _LABEL_LEAKAGE_BINS = 10
 
@@ -3679,6 +3685,115 @@ class DatasetAuditor:
         )
         report.risk_score = self._risk_score(issues)
         return report
+
+
+    def benford_law_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        top: int = 20,
+        min_samples: int = DEFAULT_BENFORD_MIN_SAMPLES,
+    ) -> list[dict[str, object]]:
+        """Compare leading-digit frequencies to Benford's law.
+
+        For each numeric column, extract the leading significant digit of
+        absolute non-zero finite values and compare the empirical
+        distribution to Benford's ``log10(1 + 1/d)`` probabilities with a
+        Pearson chi-square test (9 digits, 8 degrees of freedom). Columns
+        with fewer than ``min_samples`` usable values are skipped.
+
+        Parameters
+        ----------
+        data:
+            Tabular frame to inspect.
+        columns:
+            Optional subset of column names. Defaults to every numeric
+            column.
+        top:
+            Maximum number of columns to return, ordered by ascending
+            p-value (largest deviation first).
+        min_samples:
+            Minimum count of usable leading digits required to score a
+            column.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if (
+            not isinstance(min_samples, int)
+            or isinstance(min_samples, bool)
+            or min_samples < 9
+        ):
+            raise ValueError("min_samples must be an integer >= 9")
+
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            numeric_cols = [
+                c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])
+            ]
+        else:
+            numeric_cols = list(columns)
+            missing = [c for c in numeric_cols if c not in frame.columns]
+            if missing:
+                raise ValueError(f"unknown columns: {missing}")
+
+        expected = list(BENFORD_EXPECTED)
+        rows: list[dict[str, object]] = []
+        for column in numeric_cols:
+            series = pd.to_numeric(frame[column], errors="coerce")
+            values = series.to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            values = values[values != 0.0]
+            if values.size < min_samples:
+                continue
+            # Leading digit via scientific mantissa.
+            abs_vals = np.abs(values)
+            log10 = np.log10(abs_vals)
+            mantissa = abs_vals / np.power(10.0, np.floor(log10))
+            digits = np.clip(mantissa.astype(int), 1, 9)
+            observed = np.bincount(digits, minlength=10)[1:10].astype(float)
+            n = float(observed.sum())
+            exp_counts = n * np.asarray(expected, dtype=float)
+            # Pearson chi-square
+            with np.errstate(divide="ignore", invalid="ignore"):
+                chi = float(np.sum((observed - exp_counts) ** 2 / exp_counts))
+            # Survival function for chi2(df=8): use regularized gamma via math
+            # Incomplete gamma Q(s,x) = gammaincc(s, x) with s = df/2 = 4.
+            # Prefer scipy if available (already a dependency via pandas stack);
+            # fall back to a simple survival approx.
+            try:
+                from scipy.stats import chi2 as _chi2
+
+                pvalue = float(_chi2.sf(chi, 8))
+            except Exception:  # pragma: no cover
+                pvalue = float("nan")
+            mad = float(np.mean(np.abs(observed / n - expected)))
+            rows.append(
+                {
+                    "column": column,
+                    "n": int(n),
+                    "chi_square": chi,
+                    "p_value": pvalue,
+                    "mean_abs_deviation": mad,
+                    "digit_shares": {
+                        str(d): float(observed[d - 1] / n) for d in range(1, 10)
+                    },
+                    "benford_shares": {
+                        str(d): float(expected[d - 1]) for d in range(1, 10)
+                    },
+                    "suspect": bool(pvalue < DEFAULT_BENFORD_PVALUE)
+                    if pvalue == pvalue
+                    else False,
+                }
+            )
+
+        rows.sort(
+            key=lambda r: (
+                float(r["p_value"]) if r["p_value"] == r["p_value"] else 1.0,
+                str(r["column"]),
+            )
+        )
+        return rows[:top]
 
     def _risk_score(self, issues: Sequence[AuditIssue]) -> float:
         """Fold every blocking finding into one bounded 0-100 score.
