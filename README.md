@@ -437,3 +437,34 @@ for row in report_rows:
     if row["suspect"]:
         print(row["column"], row["p_value"], row["mean_abs_deviation"])
 ```
+
+## Distribution distance report
+
+PSI and the KS test tell you whether a column moved. They do not tell you how
+far it moved on a scale you can compare across columns.
+`DatasetAuditor.distribution_distance_report(current, reference)` returns
+bounded distances for every column the two frames share:
+
+| Field | Meaning |
+| --- | --- |
+| `js_distance` | Jensen-Shannon distance (base 2) in `[0, 1]` |
+| `hellinger` | Hellinger distance `sqrt(1 - Σ sqrt(p·q))` in `[0, 1]` |
+| `total_variation` | `½ Σ \|p - q\|` in `[0, 1]` |
+| `wasserstein` | exact earth mover's (W1) distance on raw numeric values |
+| `wasserstein_scaled` | W1 divided by the reference standard deviation (unit-free) |
+| `drifted` | `js_distance >= js_threshold` (default `0.1`) |
+
+Numeric columns are binned with reference-quantile buckets. The outer edges
+are open, so values outside the reference range land in the edge buckets.
+Categorical columns compare level shares over the union of levels, and their
+Wasserstein fields are `None`. Rows are sorted by descending JS distance.
+
+```python
+rows = DatasetAuditor().distribution_distance_report(current_df, reference_df, bins=10)
+DatasetAuditor.wasserstein_distance([0, 1, 2], [1, 2, 3])  # 1.0
+```
+
+```bash
+dataset-audit-kit distance current.csv --reference reference.csv
+dataset-audit-kit distance current.csv --reference reference.csv --json --fail-on-drift --threshold 0.15
+```

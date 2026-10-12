@@ -18,6 +18,7 @@ from .core import (
     AuditReport,
     DatasetAuditor,
     ValidationRules,
+    _format_stat,
 )
 
 
@@ -710,6 +711,19 @@ def build_parser() -> argparse.ArgumentParser:
     refs_parser.add_argument("--parent-key", default=None, help="Key column in the parent (defaults to --key)")
     refs_parser.add_argument("--show", type=int, default=10, help="Number of orphan values to list (default: 10)")
     refs_parser.add_argument("--fail-on-orphans", action="store_true", help="Exit 1 if any orphaned keys are found")
+
+    distance_parser = subparsers.add_parser(
+        "distance",
+        help="Jensen-Shannon, Hellinger, total-variation and Wasserstein distances against a reference dataset",
+    )
+    distance_parser.add_argument("data", help="Path to the current dataset")
+    distance_parser.add_argument("--reference", required=True, help="Path to the reference dataset")
+    distance_parser.add_argument("--columns", default=None, help="Comma-separated column names (default: every shared column)")
+    distance_parser.add_argument("--bins", type=int, default=10, help="Reference-quantile bins for numeric columns (default: 10)")
+    distance_parser.add_argument("--threshold", type=float, default=0.1, help="Jensen-Shannon distance at or above which a column is flagged (default: 0.1)")
+    distance_parser.add_argument("--top", type=int, default=20, help="Maximum number of columns to show (default: 20)")
+    distance_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
+    distance_parser.add_argument("--fail-on-drift", action="store_true", help="Exit 1 if any column is flagged")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1662,6 +1676,58 @@ def _key_strings(series: "pd.Series") -> "pd.Series":
     if pd.api.types.is_float_dtype(values) and (values == values.round()).all():
         return values.astype("int64").astype(str)
     return values.astype(str)
+
+
+def _cmd_distance(args: argparse.Namespace) -> int:
+    """Handle the distance subcommand."""
+    import json
+
+    data = _load(args)
+    try:
+        reference = DatasetAuditor.load_dataframe(
+            args.reference,
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Cannot read reference dataset '{args.reference}': {exc}", file=sys.stderr)
+        return 2
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        rows = DatasetAuditor().distribution_distance_report(
+            data,
+            reference,
+            columns=columns,
+            bins=args.bins,
+            top=args.top,
+            js_threshold=args.threshold,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+    elif not rows:
+        print("No shared columns to compare.")
+    else:
+        table = pd.DataFrame(
+            [
+                {
+                    "column": r["column"],
+                    "kind": r["kind"],
+                    "js": _format_stat(r["js_distance"]),
+                    "hellinger": _format_stat(r["hellinger"]),
+                    "tv": _format_stat(r["total_variation"]),
+                    "w1_scaled": "-" if r["wasserstein_scaled"] is None else _format_stat(r["wasserstein_scaled"]),
+                    "drifted": "yes" if r["drifted"] else "no",
+                }
+                for r in rows
+            ]
+        )
+        _render_table(table, "table")
+    if args.fail_on_drift and any(r["drifted"] for r in rows):
+        return 1
+    return 0
 
 
 def _cmd_refs(args: argparse.Namespace) -> int:
@@ -2678,5 +2744,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_profile_diff(args)
     elif args.command == "refs":
         return _cmd_refs(args)
+    elif args.command == "distance":
+        return _cmd_distance(args)
     else:
         parser.error("unsupported command")
