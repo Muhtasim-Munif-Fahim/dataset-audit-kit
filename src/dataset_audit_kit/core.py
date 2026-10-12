@@ -63,6 +63,8 @@ DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD = 0.99
 
 DEFAULT_BENFORD_MIN_SAMPLES = 50
 DEFAULT_BENFORD_PVALUE = 0.05
+DEFAULT_DISTANCE_BINS = 10
+DEFAULT_JS_DISTANCE_THRESHOLD = 0.1
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
 )
@@ -3794,6 +3796,163 @@ class DatasetAuditor:
             )
         )
         return rows[:top]
+
+    def distribution_distance_report(
+        self,
+        data: pd.DataFrame,
+        reference: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        bins: int = DEFAULT_DISTANCE_BINS,
+        top: int = 20,
+        js_threshold: float = DEFAULT_JS_DISTANCE_THRESHOLD,
+    ) -> list[dict[str, object]]:
+        """Bounded distribution distances between ``data`` and ``reference``.
+
+        PSI and KS answer "did it move?"; these metrics answer "how far?" on
+        scales that are comparable across columns. For every shared column:
+
+        * ``js_distance``: Jensen-Shannon distance (base 2, so in ``[0, 1]``),
+          the square root of the symmetric, smoothed KL divergence.
+        * ``hellinger``: Hellinger distance, ``sqrt(1 - sum(sqrt(p * q)))``,
+          also in ``[0, 1]``.
+        * ``total_variation``: ``0.5 * sum(|p - q|)``, the largest possible
+          difference in probability that the two samples give one event.
+
+        Numeric columns are binned into ``bins`` equal-frequency buckets from
+        the reference quantiles, with open outer edges so values outside the
+        reference range land in the edge buckets. They also get an exact
+        ``wasserstein`` (earth mover's / W1) distance on the raw values and
+        ``wasserstein_scaled``, which is W1 divided by the reference standard
+        deviation so it is unit-free. Categorical columns use level
+        proportions over the union of observed levels, and their Wasserstein
+        fields are ``None``.
+
+        ``drifted`` is ``js_distance >= js_threshold``. Rows are sorted by
+        descending ``js_distance`` and truncated to ``top``.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if not isinstance(bins, int) or isinstance(bins, bool) or bins < 2:
+            raise ValueError("bins must be an integer >= 2")
+        if (
+            isinstance(js_threshold, bool)
+            or not isinstance(js_threshold, (int, float))
+            or not math.isfinite(float(js_threshold))
+            or not 0.0 <= float(js_threshold) <= 1.0
+        ):
+            raise ValueError("js_threshold must be a number between 0 and 1")
+
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        ref = reference if isinstance(reference, pd.DataFrame) else pd.DataFrame(reference)
+        if columns is None:
+            selected = [c for c in frame.columns if c in ref.columns]
+        else:
+            selected = list(columns)
+            missing = [c for c in selected if c not in frame.columns or c not in ref.columns]
+            if missing:
+                raise ValueError(f"columns not present in both frames: {missing}")
+
+        rows: list[dict[str, object]] = []
+        for column in selected:
+            current = frame[column]
+            baseline = ref[column]
+            numeric = DatasetAuditor._psi_use_numeric(baseline, current)
+            wasserstein: float | None = None
+            scaled: float | None = None
+            if numeric:
+                base_vals = pd.to_numeric(baseline, errors="coerce").to_numpy(dtype=float)
+                cur_vals = pd.to_numeric(current, errors="coerce").to_numpy(dtype=float)
+                base_vals = base_vals[np.isfinite(base_vals)]
+                cur_vals = cur_vals[np.isfinite(cur_vals)]
+                if base_vals.size < 1 or cur_vals.size < 1:
+                    continue
+                p, q = DatasetAuditor._quantile_bin_shares(base_vals, cur_vals, bins)
+                wasserstein = DatasetAuditor.wasserstein_distance(base_vals, cur_vals)
+                std = float(np.std(base_vals))
+                scaled = wasserstein / std if std > 0.0 else None
+                n_ref, n_cur = int(base_vals.size), int(cur_vals.size)
+            else:
+                base = baseline.dropna().astype(str)
+                cur = current.dropna().astype(str)
+                if base.size < 1 or cur.size < 1:
+                    continue
+                levels = sorted(set(base.unique()).union(cur.unique()))
+                base_counts = base.value_counts()
+                cur_counts = cur.value_counts()
+                p = np.array([float(base_counts.get(lv, 0)) for lv in levels]) / base.size
+                q = np.array([float(cur_counts.get(lv, 0)) for lv in levels]) / cur.size
+                n_ref, n_cur = int(base.size), int(cur.size)
+            js = DatasetAuditor._js_distance(p, q)
+            hellinger = float(
+                math.sqrt(max(0.0, 1.0 - float(np.sum(np.sqrt(p * q)))))
+            )
+            rows.append(
+                {
+                    "column": column,
+                    "kind": "numeric" if numeric else "categorical",
+                    "n_reference": n_ref,
+                    "n_current": n_cur,
+                    "js_distance": js,
+                    "hellinger": min(hellinger, 1.0),
+                    "total_variation": float(0.5 * np.sum(np.abs(p - q))),
+                    "wasserstein": wasserstein,
+                    "wasserstein_scaled": scaled,
+                    "drifted": bool(js >= float(js_threshold)),
+                }
+            )
+
+        rows.sort(key=lambda r: (-float(r["js_distance"]), str(r["column"])))
+        return rows[:top]
+
+    @staticmethod
+    def wasserstein_distance(left: Sequence[float], right: Sequence[float]) -> float:
+        """Exact 1-Wasserstein distance between two 1-D empirical samples.
+
+        Integrates ``|F_left(x) - F_right(x)|`` over the merged support,
+        which matches ``scipy.stats.wasserstein_distance`` for unweighted
+        samples.
+        """
+        a = np.sort(np.asarray(left, dtype=float))
+        b = np.sort(np.asarray(right, dtype=float))
+        if a.size == 0 or b.size == 0:
+            raise ValueError("both samples must be non-empty")
+        if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+            raise ValueError("samples must be finite")
+        support = np.sort(np.concatenate([a, b]))
+        widths = np.diff(support)
+        cdf_a = np.searchsorted(a, support[:-1], side="right") / a.size
+        cdf_b = np.searchsorted(b, support[:-1], side="right") / b.size
+        return float(np.sum(np.abs(cdf_a - cdf_b) * widths))
+
+    @staticmethod
+    def _quantile_bin_shares(
+        baseline: np.ndarray, current: np.ndarray, bins: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Shares per reference-quantile bucket, with open outer edges."""
+        n_bins = max(1, min(int(bins), int(baseline.size)))
+        inner = np.unique(
+            np.quantile(baseline, [i / n_bins for i in range(1, n_bins)])
+        ) if n_bins > 1 else np.array([], dtype=float)
+        # Bucket i holds values in (edge[i-1], edge[i]]; ties stay together.
+        base_idx = np.searchsorted(inner, baseline, side="left")
+        cur_idx = np.searchsorted(inner, current, side="left")
+        width = inner.size + 1
+        p = np.bincount(base_idx, minlength=width).astype(float) / baseline.size
+        q = np.bincount(cur_idx, minlength=width).astype(float) / current.size
+        return p, q
+
+    @staticmethod
+    def _js_distance(p: np.ndarray, q: np.ndarray) -> float:
+        """Jensen-Shannon distance (base 2) between two probability vectors."""
+        m = 0.5 * (p + q)
+
+        def _kl(a: np.ndarray) -> float:
+            mask = a > 0
+            return float(np.sum(a[mask] * np.log2(a[mask] / m[mask])))
+
+        divergence = 0.5 * _kl(p) + 0.5 * _kl(q)
+        return float(min(1.0, math.sqrt(max(0.0, divergence))))
 
     def _risk_score(self, issues: Sequence[AuditIssue]) -> float:
         """Fold every blocking finding into one bounded 0-100 score.
