@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Sequence
 
 from .core import (
+    DEFAULT_ASSOCIATION_MAX_LEVELS,
+    DEFAULT_CRAMERS_V_THRESHOLD,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     DEFAULT_VIF_THRESHOLD,
@@ -724,6 +726,34 @@ def build_parser() -> argparse.ArgumentParser:
     distance_parser.add_argument("--top", type=int, default=20, help="Maximum number of columns to show (default: 20)")
     distance_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     distance_parser.add_argument("--fail-on-drift", action="store_true", help="Exit 1 if any column is flagged")
+
+    associate_parser = subparsers.add_parser(
+        "associate",
+        help="Pairwise Cramér's V association for categorical / low-cardinality columns",
+    )
+    associate_parser.add_argument("data", help="Path to the dataset")
+    associate_parser.add_argument("--columns", default=None, help="Comma-separated column names (default: every eligible column)")
+    associate_parser.add_argument("--top", type=int, default=20, help="Maximum number of pairs to show (default: 20)")
+    associate_parser.add_argument("--min-v", type=float, default=0.0, help="Minimum Cramér's V to include (default: 0.0)")
+    associate_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_CRAMERS_V_THRESHOLD,
+        help=f"V at or above which a pair is flagged associated (default: {DEFAULT_CRAMERS_V_THRESHOLD})",
+    )
+    associate_parser.add_argument(
+        "--max-levels",
+        type=int,
+        default=DEFAULT_ASSOCIATION_MAX_LEVELS,
+        help=f"Max distinct values for a column to be treated as categorical (default: {DEFAULT_ASSOCIATION_MAX_LEVELS})",
+    )
+    associate_parser.add_argument(
+        "--no-bias-correction",
+        action="store_true",
+        help="Disable Bergsma–Dassios bias correction",
+    )
+    associate_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
+    associate_parser.add_argument("--fail-on-associated", action="store_true", help="Exit 1 if any pair is flagged")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1726,6 +1756,51 @@ def _cmd_distance(args: argparse.Namespace) -> int:
         )
         _render_table(table, "table")
     if args.fail_on_drift and any(r["drifted"] for r in rows):
+        return 1
+    return 0
+
+
+
+def _cmd_associate(args: argparse.Namespace) -> int:
+    """Handle the associate subcommand (Cramér's V pairs)."""
+    import json
+
+    data = _load(args)
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        rows = DatasetAuditor().categorical_association_report(
+            data,
+            columns=columns,
+            top=args.top,
+            min_v=args.min_v,
+            threshold=args.threshold,
+            max_levels=args.max_levels,
+            bias_correction=not args.no_bias_correction,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+    elif not rows:
+        print("No eligible categorical pairs found.")
+    else:
+        table = pd.DataFrame(
+            [
+                {
+                    "column_a": r["column_a"],
+                    "column_b": r["column_b"],
+                    "cramers_v": _format_stat(r["cramers_v"]),
+                    "n": r["n"],
+                    "levels_a": r["levels_a"],
+                    "levels_b": r["levels_b"],
+                    "associated": "yes" if r["associated"] else "no",
+                }
+                for r in rows
+            ]
+        )
+        _render_table(table, "table")
+    if args.fail_on_associated and any(r["associated"] for r in rows):
         return 1
     return 0
 
@@ -2746,5 +2821,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_refs(args)
     elif args.command == "distance":
         return _cmd_distance(args)
+    elif args.command == "associate":
+        return _cmd_associate(args)
     else:
         parser.error("unsupported command")

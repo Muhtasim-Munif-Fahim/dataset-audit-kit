@@ -65,6 +65,8 @@ DEFAULT_BENFORD_MIN_SAMPLES = 50
 DEFAULT_BENFORD_PVALUE = 0.05
 DEFAULT_DISTANCE_BINS = 10
 DEFAULT_JS_DISTANCE_THRESHOLD = 0.1
+DEFAULT_CRAMERS_V_THRESHOLD = 0.8
+DEFAULT_ASSOCIATION_MAX_LEVELS = 50
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
 )
@@ -6751,6 +6753,184 @@ class DatasetAuditor:
                 continue
             converted[column] = cast
         return converted, skipped
+
+
+    @staticmethod
+    def cramers_v(
+        left: "pd.Series",
+        right: "pd.Series",
+        *,
+        bias_correction: bool = True,
+    ) -> float:
+        """Cramér's V association between two categorical series.
+
+        Builds a contingency table over rows where both sides are non-missing,
+        computes Pearson's chi-square, and returns V in ``[0, 1]``. With
+        ``bias_correction=True`` (default) the Bergsma–Dassios correction is
+        applied so small tables are not overstated. Identical columns yield
+        1.0; independent columns yield ~0.
+        """
+        a = left if isinstance(left, pd.Series) else pd.Series(left)
+        b = right if isinstance(right, pd.Series) else pd.Series(right)
+        if len(a) != len(b):
+            raise ValueError("left and right must have the same length")
+        mask = a.notna() & b.notna()
+        if int(mask.sum()) == 0:
+            return float("nan")
+        a = a.loc[mask].astype(str)
+        b = b.loc[mask].astype(str)
+        table = pd.crosstab(a, b)
+        n = float(table.to_numpy().sum())
+        if n <= 0:
+            return float("nan")
+        r, k = table.shape
+        if r < 2 or k < 2:
+            # A single level on either side cannot show association.
+            return 0.0
+        observed = table.to_numpy(dtype=float)
+        row_sums = observed.sum(axis=1, keepdims=True)
+        col_sums = observed.sum(axis=0, keepdims=True)
+        expected = row_sums @ col_sums / n
+        with np.errstate(divide="ignore", invalid="ignore"):
+            chi2 = float(np.nansum((observed - expected) ** 2 / expected))
+        if not bias_correction:
+            denom = n * min(r - 1, k - 1)
+            if denom <= 0:
+                return float("nan")
+            return float(min(1.0, math.sqrt(max(0.0, chi2 / denom))))
+        # Bergsma–Dassios bias correction.
+        phi2 = chi2 / n
+        phi2_corr = max(0.0, phi2 - ((r - 1) * (k - 1)) / max(n - 1, 1.0))
+        r_corr = r - ((r - 1) ** 2) / max(n - 1, 1.0)
+        k_corr = k - ((k - 1) ** 2) / max(n - 1, 1.0)
+        denom = min(max(r_corr - 1.0, 0.0), max(k_corr - 1.0, 0.0))
+        if denom <= 0:
+            return 0.0
+        return float(min(1.0, math.sqrt(phi2_corr / denom)))
+
+    def categorical_association_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        top: int = 20,
+        min_v: float = 0.0,
+        threshold: float = DEFAULT_CRAMERS_V_THRESHOLD,
+        max_levels: int = DEFAULT_ASSOCIATION_MAX_LEVELS,
+        bias_correction: bool = True,
+    ) -> list[dict[str, object]]:
+        """Pairwise Cramér's V for categorical (and low-cardinality) columns.
+
+        Pearson redundancy only sees numeric columns. This report fills that
+        gap for text / categorical features: every pair of eligible columns
+        gets a Cramér's V score, then pairs at or above ``min_v`` are returned
+        sorted by descending V. Pairs at or above ``threshold`` are marked
+        ``associated=True`` so a CI gate can fail on them.
+
+        A column is eligible when it is non-numeric, or numeric with at most
+        ``max_levels`` distinct non-missing values (so boolean / coded
+        categoricals participate). Columns with fewer than two distinct
+        levels, or more than ``max_levels`` levels, are skipped. Identifier-
+        like columns (every non-missing value unique) are also skipped.
+
+        Parameters
+        ----------
+        data:
+            Tabular frame to inspect.
+        columns:
+            Optional subset of column names. Defaults to every eligible
+            column in ``data``.
+        top:
+            Maximum number of pairs to return.
+        min_v:
+            Minimum Cramér's V for a pair to be included (0.0–1.0).
+        threshold:
+            V at or above which ``associated`` is set True.
+        max_levels:
+            Maximum distinct non-missing values a column may have to be
+            treated as categorical.
+        bias_correction:
+            Apply the Bergsma–Dassios correction (recommended for small n).
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        for name, value in (("min_v", min_v), ("threshold", threshold)):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"{name} must be a number between 0 and 1")
+        if (
+            not isinstance(max_levels, int)
+            or isinstance(max_levels, bool)
+            or max_levels < 2
+        ):
+            raise ValueError("max_levels must be an integer >= 2")
+
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            candidates = list(frame.columns)
+        else:
+            candidates = list(columns)
+            missing = [c for c in candidates if c not in frame.columns]
+            if missing:
+                raise ValueError(f"unknown columns: {missing}")
+
+        eligible: list[str] = []
+        for column in candidates:
+            series = frame[column]
+            n_valid = int(series.notna().sum())
+            if n_valid < 2:
+                continue
+            n_unique = int(series.nunique(dropna=True))
+            if n_unique < 2 or n_unique > max_levels:
+                continue
+            if n_unique >= n_valid:
+                # Identifier-like: every non-missing value is unique.
+                continue
+            # Non-numeric columns always qualify once level bounds pass.
+            # Numeric columns with few distinct values (bools, codes) also
+            # qualify; high-cardinality numerics were already excluded.
+            eligible.append(str(column))
+
+        rows: list[dict[str, object]] = []
+        for i in range(len(eligible)):
+            for j in range(i + 1, len(eligible)):
+                col_a, col_b = eligible[i], eligible[j]
+                v = DatasetAuditor.cramers_v(
+                    frame[col_a],
+                    frame[col_b],
+                    bias_correction=bias_correction,
+                )
+                if v != v:  # NaN
+                    continue
+                if float(v) < float(min_v):
+                    continue
+                n_levels_a = int(frame[col_a].nunique(dropna=True))
+                n_levels_b = int(frame[col_b].nunique(dropna=True))
+                pair_n = int((frame[col_a].notna() & frame[col_b].notna()).sum())
+                rows.append(
+                    {
+                        "column_a": col_a,
+                        "column_b": col_b,
+                        "cramers_v": float(v),
+                        "n": pair_n,
+                        "levels_a": n_levels_a,
+                        "levels_b": n_levels_b,
+                        "associated": bool(float(v) >= float(threshold)),
+                        "threshold": float(threshold),
+                    }
+                )
+
+        rows.sort(
+            key=lambda r: (
+                -float(r["cramers_v"]),
+                str(r["column_a"]),
+                str(r["column_b"]),
+            )
+        )
+        return rows[:top]
 
     @staticmethod
     def memory_optimization_report(
