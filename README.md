@@ -34,11 +34,33 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Opt-in multicollinearity audit via variance inflation factors (VIF) on numeric columns.
 - **Target-encoding leakage** (opt-in): flag numeric features that match in-sample categorical target means — a common leakage from fitting mean encodings on the full frame.
 - Opt-in label-leakage audit: absolute correlation and normalized mutual information between each feature and the label.
+- **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
 - JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
+
+### Categorical association (Cramér's V)
+
+Pearson redundancy only sees numeric columns. Use `associate` to score every pair of categorical / low-cardinality columns with bias-corrected Cramér's V:
+
+```bash
+dataset-audit-kit associate data.csv
+dataset-audit-kit associate data.csv --threshold 0.8 --fail-on-associated
+dataset-audit-kit associate data.csv --json --columns city,region,segment
+```
+
+Pairs at or above `--threshold` (default `0.8`) are marked `associated`. Identifier-like columns and columns with more than `--max-levels` distinct values (default `50`) are skipped.
+
+In Python:
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+rows = DatasetAuditor().categorical_association_report(df, threshold=0.8)
+v = DatasetAuditor.cramers_v(df["city"], df["region"])
+```
 
 ## Installation
 
