@@ -14,6 +14,8 @@ from typing import Sequence
 from .core import (
     DEFAULT_ASSOCIATION_MAX_LEVELS,
     DEFAULT_CRAMERS_V_THRESHOLD,
+    DEFAULT_FD_MAX_DETERMINANT_RATIO,
+    DEFAULT_FD_MAX_G3,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     DEFAULT_VIF_THRESHOLD,
@@ -754,6 +756,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     associate_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     associate_parser.add_argument("--fail-on-associated", action="store_true", help="Exit 1 if any pair is flagged")
+
+    fd_parser = subparsers.add_parser(
+        "fd",
+        help="Exact and approximate functional dependencies (A -> B) via g3 error",
+    )
+    fd_parser.add_argument("data", help="Path to the dataset")
+    fd_parser.add_argument("--columns", default=None, help="Comma-separated column names (default: every column)")
+    fd_parser.add_argument("--top", type=int, default=20, help="Maximum number of dependencies to show (default: 20)")
+    fd_parser.add_argument(
+        "--max-g3",
+        type=float,
+        default=DEFAULT_FD_MAX_G3,
+        help=f"Max share of violating rows for an approximate dependency (default: {DEFAULT_FD_MAX_G3})",
+    )
+    fd_parser.add_argument(
+        "--max-determinant-ratio",
+        type=float,
+        default=DEFAULT_FD_MAX_DETERMINANT_RATIO,
+        help=(
+            "Skip determinants whose distinct/rows ratio exceeds this "
+            f"(identifier-like columns; default: {DEFAULT_FD_MAX_DETERMINANT_RATIO})"
+        ),
+    )
+    fd_parser.add_argument("--include-all", action="store_true", help="Also list scored pairs above --max-g3")
+    fd_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
+    fd_parser.add_argument("--fail-on-dependency", action="store_true", help="Exit 1 if any dependency is found")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1805,6 +1833,50 @@ def _cmd_associate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_fd(args: argparse.Namespace) -> int:
+    """Handle the fd subcommand (functional dependencies)."""
+    import json
+
+    data = _load(args)
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        rows = DatasetAuditor().functional_dependency_report(
+            data,
+            columns=columns,
+            top=args.top,
+            max_g3=args.max_g3,
+            max_determinant_ratio=args.max_determinant_ratio,
+            include_all=args.include_all,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+    elif not rows:
+        print("No functional dependencies found.")
+    else:
+        table = pd.DataFrame(
+            [
+                {
+                    "dependency": f"{r['determinant']} -> {r['dependent']}",
+                    "g3": _format_stat(r["g3"]),
+                    "violating_rows": r["violating_rows"],
+                    "n": r["n"],
+                    "levels": f"{r['determinant_levels']} -> {r['dependent_levels']}",
+                    "exact": "yes" if r["exact"] else "no",
+                    "bijective": "yes" if r["bijective"] else "no",
+                    "flagged": "yes" if r["dependency"] else "no",
+                }
+                for r in rows
+            ]
+        )
+        _render_table(table, "table")
+    if args.fail_on_dependency and any(r["dependency"] for r in rows):
+        return 1
+    return 0
+
+
 def _cmd_refs(args: argparse.Namespace) -> int:
     """Handle the refs subcommand."""
     child = _load(args)
@@ -2823,5 +2895,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_distance(args)
     elif args.command == "associate":
         return _cmd_associate(args)
+    elif args.command == "fd":
+        return _cmd_fd(args)
     else:
         parser.error("unsupported command")

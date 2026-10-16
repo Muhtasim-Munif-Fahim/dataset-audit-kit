@@ -67,6 +67,13 @@ DEFAULT_DISTANCE_BINS = 10
 DEFAULT_JS_DISTANCE_THRESHOLD = 0.1
 DEFAULT_CRAMERS_V_THRESHOLD = 0.8
 DEFAULT_ASSOCIATION_MAX_LEVELS = 50
+#: g3 error at or below which ``A -> B`` is reported as an (approximate)
+#: functional dependency: at most 1% of rows would need to change for the
+#: dependency to hold exactly.
+DEFAULT_FD_MAX_G3 = 0.01
+#: Determinants with more distinct values than this share of rows are
+#: near-identifiers that trivially "determine" everything and are skipped.
+DEFAULT_FD_MAX_DETERMINANT_RATIO = 0.5
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
 )
@@ -6928,6 +6935,170 @@ class DatasetAuditor:
                 -float(r["cramers_v"]),
                 str(r["column_a"]),
                 str(r["column_b"]),
+            )
+        )
+        return rows[:top]
+
+    @staticmethod
+    def functional_dependency_g3(
+        determinant: "pd.Series",
+        dependent: "pd.Series",
+    ) -> tuple[float, int, int]:
+        """g3 error of the dependency ``determinant -> dependent``.
+
+        g3 (Kivinen & Mannila, 1995) is the minimum share of rows that must be
+        removed for the dependency to hold exactly: for each determinant value
+        keep only the rows carrying its most frequent dependent value. Rows
+        where either side is missing are ignored.
+
+        Returns ``(g3, violating_rows, n)``. ``g3 == 0`` means an exact
+        functional dependency; ``n == 0`` yields ``(nan, 0, 0)``.
+        """
+        a = determinant if isinstance(determinant, pd.Series) else pd.Series(determinant)
+        b = dependent if isinstance(dependent, pd.Series) else pd.Series(dependent)
+        if len(a) != len(b):
+            raise ValueError("determinant and dependent must have the same length")
+        mask = a.notna().to_numpy() & b.notna().to_numpy()
+        n = int(mask.sum())
+        if n == 0:
+            return float("nan"), 0, 0
+        pair = pd.DataFrame(
+            {"a": a.to_numpy()[mask], "b": b.to_numpy()[mask]}
+        )
+        counts = pair.groupby(["a", "b"], sort=False, dropna=False).size()
+        kept = int(counts.groupby(level=0, sort=False).max().sum())
+        violations = n - kept
+        return float(violations / n), int(violations), n
+
+    def functional_dependency_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        top: int = 20,
+        max_g3: float = DEFAULT_FD_MAX_G3,
+        max_determinant_ratio: float = DEFAULT_FD_MAX_DETERMINANT_RATIO,
+        include_all: bool = False,
+    ) -> list[dict[str, object]]:
+        """Find exact and approximate functional dependencies ``A -> B``.
+
+        A functional dependency means every value of ``A`` maps to a single
+        value of ``B`` (``zip_code -> city``, ``product_id -> category``).
+        Such columns are redundant or derived: they leak through
+        preprocessing, double-count in models, and silently break when the
+        mapping is violated by a data-entry error. Each ordered pair of
+        eligible columns is scored with the g3 error (share of rows that
+        would have to change for the dependency to hold); pairs with
+        ``g3 <= max_g3`` are returned with ``dependency=True``.
+
+        ``exact`` marks ``g3 == 0``; ``bijective`` marks pairs where the
+        reverse dependency ``B -> A`` also holds within ``max_g3`` (a
+        relabelled copy). Determinants whose distinct-value count exceeds
+        ``max_determinant_ratio`` of the rows (identifier-like columns that
+        trivially determine everything) and constant dependents are skipped.
+
+        Parameters
+        ----------
+        data:
+            Tabular frame to inspect.
+        columns:
+            Optional subset of column names (default: every column).
+        top:
+            Maximum number of rows to return.
+        max_g3:
+            g3 error at or below which a dependency is reported (0.0-1.0).
+        max_determinant_ratio:
+            Maximum ``distinct / non-missing`` ratio for a determinant.
+        include_all:
+            Also return scored pairs above ``max_g3`` (``dependency=False``),
+            useful for eyeballing near misses.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        for name, value in (
+            ("max_g3", max_g3),
+            ("max_determinant_ratio", max_determinant_ratio),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"{name} must be a number between 0 and 1")
+
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            candidates = list(frame.columns)
+        else:
+            candidates = list(columns)
+            missing = [c for c in candidates if c not in frame.columns]
+            if missing:
+                raise ValueError(f"unknown columns: {missing}")
+
+        levels: dict[str, int] = {}
+        valid: dict[str, int] = {}
+        for column in candidates:
+            series = frame[column]
+            valid[column] = int(series.notna().sum())
+            levels[column] = int(series.nunique(dropna=True))
+
+        def can_determine(column: object) -> bool:
+            n_valid = valid[column]
+            if n_valid < 2 or levels[column] < 1:
+                return False
+            return levels[column] / n_valid <= float(max_determinant_ratio)
+
+        def can_depend(column: object) -> bool:
+            return valid[column] >= 2 and levels[column] >= 2
+
+        scores: dict[tuple[object, object], tuple[float, int, int]] = {}
+
+        def score(a: object, b: object) -> tuple[float, int, int]:
+            key = (a, b)
+            if key not in scores:
+                scores[key] = DatasetAuditor.functional_dependency_g3(frame[a], frame[b])
+            return scores[key]
+
+        rows: list[dict[str, object]] = []
+        for a in candidates:
+            if not can_determine(a):
+                continue
+            for b in candidates:
+                if a == b or not can_depend(b):
+                    continue
+                g3, violations, n = score(a, b)
+                if g3 != g3 or n < 2:  # NaN / too few rows
+                    continue
+                is_dependency = g3 <= float(max_g3)
+                if not is_dependency and not include_all:
+                    continue
+                bijective = False
+                if is_dependency and can_determine(b) and can_depend(a):
+                    reverse_g3, _, _ = score(b, a)
+                    bijective = bool(reverse_g3 == reverse_g3 and reverse_g3 <= float(max_g3))
+                rows.append(
+                    {
+                        "determinant": str(a),
+                        "dependent": str(b),
+                        "g3": float(g3),
+                        "violating_rows": int(violations),
+                        "n": int(n),
+                        "determinant_levels": levels[a],
+                        "dependent_levels": levels[b],
+                        "exact": bool(violations == 0),
+                        "bijective": bijective,
+                        "dependency": bool(is_dependency),
+                        "max_g3": float(max_g3),
+                    }
+                )
+
+        rows.sort(
+            key=lambda r: (
+                not r["dependency"],
+                float(r["g3"]),
+                -int(r["dependent_levels"]),
+                str(r["determinant"]),
+                str(r["dependent"]),
             )
         )
         return rows[:top]

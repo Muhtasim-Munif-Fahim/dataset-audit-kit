@@ -35,11 +35,31 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Target-encoding leakage** (opt-in): flag numeric features that match in-sample categorical target means — a common leakage from fitting mean encodings on the full frame.
 - Opt-in label-leakage audit: absolute correlation and normalized mutual information between each feature and the label.
 - **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
+- **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
 - JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
+
+### Functional dependencies (`fd`)
+
+A functional dependency `A -> B` means each value of `A` maps to exactly one value of `B` (`zip -> city`, `product_id -> category`). Such columns are derived or redundant, and the few rows that violate an almost-perfect mapping are usually data-entry errors. `fd` scores every ordered column pair with the **g3 error** (Kivinen & Mannila): the minimum share of rows that must change for the dependency to hold exactly.
+
+```bash
+dataset-audit-kit fd data.csv                       # exact + approximate (g3 <= 0.01)
+dataset-audit-kit fd data.csv --max-g3 0 --json     # exact dependencies only
+dataset-audit-kit fd data.csv --include-all --top 50 --fail-on-dependency
+```
+
+Rows report `g3`, `violating_rows`, level counts, `exact` (g3 = 0) and `bijective` (the reverse dependency also holds, i.e. a relabelled copy). Identifier-like determinants (distinct/rows above `--max-determinant-ratio`, default `0.5`) and constant dependents are skipped, since they make dependencies trivially true.
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+rows = DatasetAuditor().functional_dependency_report(df, max_g3=0.01)
+g3, violations, n = DatasetAuditor.functional_dependency_g3(df["zip"], df["city"])
+```
 
 ### Categorical association (Cramér's V)
 
