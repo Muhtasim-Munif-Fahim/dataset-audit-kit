@@ -74,6 +74,10 @@ DEFAULT_FD_MAX_G3 = 0.01
 #: Determinants with more distinct values than this share of rows are
 #: near-identifiers that trivially "determine" everything and are skipped.
 DEFAULT_FD_MAX_DETERMINANT_RATIO = 0.5
+#: Significance level for Little's MCAR test.
+DEFAULT_MCAR_ALPHA = 0.05
+#: EM iterations for the MCAR test's mean / covariance estimate.
+DEFAULT_MCAR_MAX_ITER = 500
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
 )
@@ -7104,6 +7108,227 @@ class DatasetAuditor:
         return rows[:top]
 
     @staticmethod
+    @staticmethod
+    def chi_square_sf(statistic: float, df: float) -> float:
+        """Upper-tail chi-square probability via the regularized gamma ``Q(df/2, x/2)``.
+
+        Pure Python (series / Lentz continued fraction), so the MCAR test does
+        not need scipy.
+        """
+        if df <= 0:
+            raise ValueError("df must be positive")
+        a = df / 2.0
+        x = max(0.0, float(statistic)) / 2.0
+        if x == 0.0:
+            return 1.0
+        if math.isinf(x):
+            return 0.0
+        log_prefix = -x + a * math.log(x) - math.lgamma(a)
+        if x < a + 1.0:
+            term = total = 1.0 / a
+            ap = a
+            for _ in range(10000):
+                ap += 1.0
+                term *= x / ap
+                total += term
+                if abs(term) < abs(total) * 1e-16:
+                    break
+            return float(min(1.0, max(0.0, 1.0 - total * math.exp(log_prefix))))
+        tiny = 1e-300
+        b = x + 1.0 - a
+        c = 1.0 / tiny
+        d = 1.0 / b
+        h = d
+        for i in range(1, 10000):
+            an = -i * (i - a)
+            b += 2.0
+            d = an * d + b
+            d = tiny if abs(d) < tiny else d
+            c = b + an / c
+            c = tiny if abs(c) < tiny else c
+            d = 1.0 / d
+            delta = d * c
+            h *= delta
+            if abs(delta - 1.0) < 1e-16:
+                break
+        return float(min(1.0, max(0.0, math.exp(log_prefix) * h)))
+
+    @staticmethod
+    def em_mean_covariance(
+        values: np.ndarray, *, max_iter: int = DEFAULT_MCAR_MAX_ITER, tol: float = 1e-8
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        """Maximum-likelihood mean / covariance of a Gaussian with missing values (EM).
+
+        ``values`` is ``(n, p)`` with ``NaN`` for missing entries; rows with no
+        observed value must be removed first. Starts from available-case means
+        and variances, then alternates the E-step (conditional means and
+        covariances of the missing block given the observed block, per
+        missingness pattern) with the M-step until the largest parameter
+        change is below ``tol``. Returns ``(mean, covariance, iterations)``.
+        """
+        X = np.asarray(values, dtype=float)
+        n, p = X.shape
+        observed = ~np.isnan(X)
+        mu = np.nanmean(X, axis=0)
+        var = np.nanvar(X, axis=0)
+        var[~np.isfinite(var) | (var <= 0)] = 1.0
+        sigma = np.diag(var)
+        patterns: dict[bytes, list[int]] = {}
+        for i in range(n):
+            patterns.setdefault(observed[i].tobytes(), []).append(i)
+        groups = [(observed[rows[0]], np.asarray(rows)) for rows in patterns.values()]
+        iterations = 0
+        for iterations in range(1, int(max_iter) + 1):
+            sum_x = np.zeros(p)
+            sum_xx = np.zeros((p, p))
+            for obs, rows in groups:
+                mis = ~obs
+                block = X[np.ix_(rows, np.flatnonzero(obs))]
+                filled = np.empty((rows.size, p))
+                filled[:, obs] = block
+                cond_cov = np.zeros((p, p))
+                if mis.any():
+                    s_oo = sigma[np.ix_(obs, obs)]
+                    s_mo = sigma[np.ix_(mis, obs)]
+                    coef = np.linalg.solve(s_oo, s_mo.T).T  # (m, o)
+                    filled[:, mis] = mu[mis] + (block - mu[obs]) @ coef.T
+                    cond_cov[np.ix_(mis, mis)] = sigma[np.ix_(mis, mis)] - coef @ s_mo.T
+                sum_x += filled.sum(axis=0)
+                sum_xx += filled.T @ filled + rows.size * cond_cov
+            new_mu = sum_x / n
+            new_sigma = sum_xx / n - np.outer(new_mu, new_mu)
+            new_sigma = (new_sigma + new_sigma.T) / 2.0
+            change = max(np.max(np.abs(new_mu - mu)), np.max(np.abs(new_sigma - sigma)))
+            mu, sigma = new_mu, new_sigma
+            if change < tol:
+                break
+        return mu, sigma, iterations
+
+    def mcar_test_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        alpha: float = DEFAULT_MCAR_ALPHA,
+        max_iter: int = DEFAULT_MCAR_MAX_ITER,
+        top_patterns: int = 20,
+    ) -> dict[str, object]:
+        """Little's (1988) chi-square test that numeric data are missing completely at random.
+
+        Under MCAR, missingness is unrelated to any value, so complete-case
+        analysis and simple imputation are unbiased; when MCAR is rejected
+        the data are at best MAR and naive deletion can bias every
+        downstream estimate. The test groups rows by missingness pattern
+        ``j`` and compares each pattern's observed-variable means ``ybar_j``
+        with the EM maximum-likelihood estimates ``(mu, Sigma)``::
+
+            d2 = sum_j n_j (ybar_j - mu_j)' Sigma_j^{-1} (ybar_j - mu_j)
+
+        which is asymptotically chi-square with ``sum_j p_j - p`` degrees of
+        freedom (``p_j`` observed variables in pattern ``j``). A small
+        p-value means pattern means differ more than chance allows, i.e. the
+        data are *not* MCAR.
+
+        Only numeric columns are used (default: every numeric column with at
+        least two observed values and non-zero variance); rows with every
+        selected column missing are dropped. Returns a dict with
+        ``statistic``, ``df``, ``p_value``, ``mcar_rejected`` (``p < alpha``),
+        ``n_rows`` / ``n_dropped_rows``, ``n_patterns``, ``columns``,
+        ``missing_share`` per column, the EM ``mean`` and iteration count, and
+        the ``patterns`` table (most frequent first) with each pattern's
+        missing columns and its contribution to ``d2``. With no missing
+        values the test is undefined: ``statistic`` and ``p_value`` are
+        ``None`` and ``note`` says why.
+        """
+        if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0.0 < float(alpha) < 1.0:
+            raise ValueError("alpha must be a number between 0 and 1 (exclusive)")
+        if not isinstance(max_iter, int) or isinstance(max_iter, bool) or max_iter <= 0:
+            raise ValueError("max_iter must be a positive integer")
+        if not isinstance(top_patterns, int) or isinstance(top_patterns, bool) or top_patterns <= 0:
+            raise ValueError("top_patterns must be a positive integer")
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            candidates = [
+                c for c in frame.columns
+                if pd.api.types.is_numeric_dtype(frame[c]) and not pd.api.types.is_bool_dtype(frame[c])
+            ]
+        else:
+            candidates = list(columns)
+            unknown = [c for c in candidates if c not in frame.columns]
+            if unknown:
+                raise ValueError(f"unknown columns: {unknown}")
+            bad = [c for c in candidates if not pd.api.types.is_numeric_dtype(frame[c])]
+            if bad:
+                raise ValueError(f"MCAR test needs numeric columns; not numeric: {bad}")
+        usable = []
+        for c in candidates:
+            col = pd.to_numeric(frame[c], errors="coerce").astype(float)
+            if col.notna().sum() >= 2 and float(col.var(skipna=True)) > 0:
+                usable.append(c)
+        if not usable:
+            raise ValueError("no numeric columns with at least two distinct observed values")
+        X_all = frame[usable].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        keep = ~np.isnan(X_all).all(axis=1)
+        X = X_all[keep]
+        n, p = X.shape
+        missing_share = {str(c): float(np.isnan(X_all[:, j]).mean()) for j, c in enumerate(usable)}
+        base: dict[str, object] = {
+            "columns": [str(c) for c in usable],
+            "n_rows": int(n),
+            "n_dropped_rows": int((~keep).sum()),
+            "missing_share": missing_share,
+            "alpha": float(alpha),
+        }
+        observed = ~np.isnan(X)
+        if observed.all():
+            return {
+                **base,
+                "statistic": None, "df": 0, "p_value": None, "mcar_rejected": False,
+                "n_patterns": 1, "mean": [float(v) for v in X.mean(axis=0)], "em_iterations": 0,
+                "patterns": [], "note": "no missing values in the selected columns",
+            }
+        mu, sigma, iterations = DatasetAuditor.em_mean_covariance(X, max_iter=max_iter)
+        patterns: dict[bytes, list[int]] = {}
+        for i in range(n):
+            patterns.setdefault(observed[i].tobytes(), []).append(i)
+        d2 = 0.0
+        df = 0
+        rows_out: list[dict[str, object]] = []
+        for key, rows in patterns.items():
+            obs = observed[rows[0]]
+            idx = np.flatnonzero(obs)
+            diff = X[np.ix_(rows, idx)].mean(axis=0) - mu[idx]
+            s_oo = sigma[np.ix_(idx, idx)]
+            contrib = float(len(rows) * diff @ np.linalg.lstsq(s_oo, diff, rcond=None)[0])
+            d2 += contrib
+            df += int(idx.size)
+            rows_out.append({
+                "missing_columns": [str(usable[j]) for j in np.flatnonzero(~obs)],
+                "n": len(rows),
+                "share": len(rows) / n,
+                "contribution": contrib,
+            })
+        df -= p
+        rows_out.sort(key=lambda r: (-int(r["n"]), len(r["missing_columns"]), r["missing_columns"]))
+        if df <= 0:
+            p_value = None
+            note = "degrees of freedom <= 0 (too few missingness patterns)"
+        else:
+            p_value = DatasetAuditor.chi_square_sf(d2, df)
+            note = None
+        return {
+            **base,
+            "statistic": float(d2),
+            "df": int(df),
+            "p_value": p_value,
+            "mcar_rejected": bool(p_value is not None and p_value < float(alpha)),
+            "n_patterns": len(patterns),
+            "mean": [float(v) for v in mu],
+            "em_iterations": int(iterations),
+            "patterns": rows_out[:top_patterns],
+            "note": note,
+        }
+
     def memory_optimization_report(
         data: pd.DataFrame,
         *,

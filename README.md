@@ -36,6 +36,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - Opt-in label-leakage audit: absolute correlation and normalized mutual information between each feature and the label.
 - **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
 - **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
+- **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -59,6 +60,24 @@ from dataset_audit_kit import DatasetAuditor
 
 rows = DatasetAuditor().functional_dependency_report(df, max_g3=0.01)
 g3, violations, n = DatasetAuditor.functional_dependency_g3(df["zip"], df["city"])
+```
+
+### Missing completely at random? (`mcar`)
+
+Dropping incomplete rows or mean-imputing is only unbiased when values are **missing completely at random** (MCAR). `mcar` runs Little's (1988) test: rows are grouped by missingness pattern, the Gaussian mean / covariance are estimated by EM from all observed values, and each pattern's observed means are compared with them,
+`d2 = sum_j n_j (ybar_j - mu_j)' Sigma_j^-1 (ybar_j - mu_j)`, which is chi-square with `sum_j p_j - p` degrees of freedom under MCAR. A small p-value means missingness depends on the data (at best MAR), so prefer model-based imputation.
+
+```bash
+dataset-audit-kit mcar data.csv                      # all numeric columns
+dataset-audit-kit mcar data.csv --columns age,income,score --alpha 0.01
+dataset-audit-kit mcar data.csv --json --fail-on-reject
+```
+
+The pattern table lists each missingness pattern's row count and its contribution to `d2`, so the patterns driving a rejection stand out. The chi-square tail uses a pure-Python regularized incomplete gamma, so no scipy is needed.
+
+```python
+res = DatasetAuditor().mcar_test_report(df, columns=["age", "income"])
+res["statistic"], res["df"], res["p_value"], res["mcar_rejected"], res["patterns"][:3]
 ```
 
 ### Categorical association (Cramér's V)

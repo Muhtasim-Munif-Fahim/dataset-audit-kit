@@ -17,6 +17,7 @@ from .core import (
     DEFAULT_FD_MAX_DETERMINANT_RATIO,
     DEFAULT_FD_MAX_G3,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
+    DEFAULT_MCAR_ALPHA,
     DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     DEFAULT_VIF_THRESHOLD,
     AuditReport,
@@ -782,6 +783,22 @@ def build_parser() -> argparse.ArgumentParser:
     fd_parser.add_argument("--include-all", action="store_true", help="Also list scored pairs above --max-g3")
     fd_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     fd_parser.add_argument("--fail-on-dependency", action="store_true", help="Exit 1 if any dependency is found")
+
+    mcar_parser = subparsers.add_parser(
+        "mcar",
+        help="Little's chi-square test that numeric values are missing completely at random",
+    )
+    mcar_parser.add_argument("data", help="Path to the dataset")
+    mcar_parser.add_argument("--columns", default=None, help="Comma-separated numeric columns (default: every numeric column)")
+    mcar_parser.add_argument(
+        "--alpha",
+        type=float,
+        default=DEFAULT_MCAR_ALPHA,
+        help=f"Significance level for rejecting MCAR (default: {DEFAULT_MCAR_ALPHA})",
+    )
+    mcar_parser.add_argument("--top", type=int, default=10, help="Missingness patterns to list (default: 10)")
+    mcar_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    mcar_parser.add_argument("--fail-on-reject", action="store_true", help="Exit 1 if MCAR is rejected")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1877,6 +1894,49 @@ def _cmd_fd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcar(args: argparse.Namespace) -> int:
+    """Handle the mcar subcommand (Little's MCAR test)."""
+    import json
+
+    data = _load(args)
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        result = DatasetAuditor().mcar_test_report(
+            data, columns=columns, alpha=args.alpha, top_patterns=args.top
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"Little's MCAR test on {len(result['columns'])} numeric column(s), {result['n_rows']} row(s)")
+        if result["p_value"] is None:
+            print(f"Not applicable: {result['note']}")
+        else:
+            verdict = "REJECTED (not MCAR)" if result["mcar_rejected"] else "not rejected"
+            print(
+                f"chi2 = {_format_stat(result['statistic'])}, df = {result['df']}, "
+                f"p = {result['p_value']:.4g} -> MCAR {verdict} at alpha = {result['alpha']:g}"
+            )
+            print(f"{result['n_patterns']} missingness pattern(s); EM iterations: {result['em_iterations']}")
+            table = pd.DataFrame(
+                [
+                    {
+                        "missing": ", ".join(r["missing_columns"]) or "(complete)",
+                        "rows": r["n"],
+                        "share": f"{r['share']:.3f}",
+                        "chi2_contribution": _format_stat(r["contribution"]),
+                    }
+                    for r in result["patterns"]
+                ]
+            )
+            _render_table(table, "table")
+    if args.fail_on_reject and result["mcar_rejected"]:
+        return 1
+    return 0
+
+
 def _cmd_refs(args: argparse.Namespace) -> int:
     """Handle the refs subcommand."""
     child = _load(args)
@@ -2897,5 +2957,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_associate(args)
     elif args.command == "fd":
         return _cmd_fd(args)
+    elif args.command == "mcar":
+        return _cmd_mcar(args)
     else:
         parser.error("unsupported command")
