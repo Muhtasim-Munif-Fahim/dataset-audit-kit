@@ -18,6 +18,8 @@ from .core import (
     DEFAULT_FD_MAX_G3,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     DEFAULT_MCAR_ALPHA,
+    DEFAULT_LABEL_ISSUE_METHOD,
+    LABEL_ISSUE_METHODS,
     DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
     DEFAULT_VIF_THRESHOLD,
     AuditReport,
@@ -799,6 +801,27 @@ def build_parser() -> argparse.ArgumentParser:
     mcar_parser.add_argument("--top", type=int, default=10, help="Missingness patterns to list (default: 10)")
     mcar_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     mcar_parser.add_argument("--fail-on-reject", action="store_true", help="Exit 1 if MCAR is rejected")
+
+    li_parser = subparsers.add_parser(
+        "label-issues",
+        help="Confident-learning audit: rows whose label is likely wrong given out-of-sample predicted probabilities",
+    )
+    li_parser.add_argument("data", help="Path to the dataset")
+    li_parser.add_argument("--label", required=True, help="Label column")
+    li_parser.add_argument(
+        "--probs",
+        required=True,
+        help="CSV of out-of-sample predicted probabilities, one row per data row, one column per class (header = class values)",
+    )
+    li_parser.add_argument(
+        "--method",
+        choices=LABEL_ISSUE_METHODS,
+        default=DEFAULT_LABEL_ISSUE_METHOD,
+        help=f"Pruning rule (default: {DEFAULT_LABEL_ISSUE_METHOD})",
+    )
+    li_parser.add_argument("--top", type=int, default=20, help="Issues to list (default: 20)")
+    li_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    li_parser.add_argument("--fail-on-issues", action="store_true", help="Exit 1 if any label issue is found")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1937,6 +1960,39 @@ def _cmd_mcar(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_label_issues(args: argparse.Namespace) -> int:
+    """Handle the label-issues subcommand (confident learning)."""
+    import json
+
+    data = _load(args)
+    try:
+        probs = pd.read_csv(args.probs)
+        result = DatasetAuditor().label_issues_report(
+            data, args.label, probs, method=args.method, top=args.top
+        )
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Confident learning ({result['method']}) on {result['n_rows']} row(s), "
+            f"{len(result['classes'])} class(es)"
+        )
+        print(
+            f"Estimated label noise: {result['noise_rate']:.2%}; "
+            f"{result['n_issues']} likely label issue(s) ({result['issue_share']:.2%} of rows)"
+        )
+        _render_table(pd.DataFrame(result["per_class"]), "table")
+        if result["issues"]:
+            print("Most suspicious rows (lowest normalized margin first):")
+            _render_table(pd.DataFrame(result["issues"]), "table")
+    if args.fail_on_issues and result["n_issues"] > 0:
+        return 1
+    return 0
+
+
 def _cmd_refs(args: argparse.Namespace) -> int:
     """Handle the refs subcommand."""
     child = _load(args)
@@ -2959,5 +3015,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_fd(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
+    elif args.command == "label-issues":
+        return _cmd_label_issues(args)
     else:
         parser.error("unsupported command")
