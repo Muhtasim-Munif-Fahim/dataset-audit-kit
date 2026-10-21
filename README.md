@@ -37,6 +37,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
 - **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
 - **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
+- **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -78,6 +79,29 @@ The pattern table lists each missingness pattern's row count and its contributio
 ```python
 res = DatasetAuditor().mcar_test_report(df, columns=["age", "income"])
 res["statistic"], res["df"], res["p_value"], res["mcar_rejected"], res["patterns"][:3]
+```
+
+### Mislabelled rows (`label-issues`)
+
+Label noise silently caps model quality. `label-issues` runs **confident learning** (Northcutt, Jiang & Chuang, 2021) on *out-of-sample* (cross-validated) class probabilities:
+
+1. Per-class thresholds `t_j` = mean predicted probability of class `j` over rows labelled `j`.
+2. **Confident joint** `C[given, true]`: each row is counted under the class whose probability clears its threshold (the argmax if several do), then calibrated so row `i` sums to the number of rows labelled `i`. `1 - trace(C) / n` estimates the share of mislabelled rows.
+3. Pruning: `prune_by_noise_rate` (default) flags, for each off-diagonal cell `(i, j)`, the `C[i, j]` rows labelled `i` with the largest margin `p_j - p_i`. `prune_by_class` flags the `n_i - C[i, i]` lowest self-confidence rows. `both` takes the intersection, and `confident_joint` flags the raw off-diagonals. Rows whose argmax equals their label are never flagged.
+
+The flagged mask matches `cleanlab.filter.find_label_issues(..., filter_by=...)`. This was cross-checked on 300 random problems across all four rules, and reference values are pinned in the tests, so cleanlab is not a dependency.
+
+```bash
+# probs.csv: one row per data row, one column per class (header = class values)
+dataset-audit-kit label-issues data.csv --label species --probs oof_probs.csv
+dataset-audit-kit label-issues data.csv --label species --probs oof_probs.csv --method both --json --fail-on-issues
+```
+
+```python
+res = DatasetAuditor().label_issues_report(df, "species", oof_probs_df, top=20)
+res["noise_rate"], res["n_issues"], res["issues"][:3]       # index, given, suggested, self_confidence, margin
+mask = DatasetAuditor.find_label_issues(y_idx, P, method="prune_by_noise_rate")
+cj = DatasetAuditor.confident_joint(y_idx, P)              # joint, thresholds, noise matrices
 ```
 
 ### Categorical association (Cramér's V)

@@ -78,6 +78,9 @@ DEFAULT_FD_MAX_DETERMINANT_RATIO = 0.5
 DEFAULT_MCAR_ALPHA = 0.05
 #: EM iterations for the MCAR test's mean / covariance estimate.
 DEFAULT_MCAR_MAX_ITER = 500
+#: Pruning rule used by the confident-learning label-issue audit.
+DEFAULT_LABEL_ISSUE_METHOD = "prune_by_noise_rate"
+LABEL_ISSUE_METHODS = ("confident_joint", "prune_by_noise_rate", "prune_by_class", "both")
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
 )
@@ -7395,4 +7398,302 @@ class DatasetAuditor:
             "saved_bytes": saved_total,
             "saved_ratio": round(saved_total / current_total, 4) if current_total else 0.0,
             "skipped": skipped,
+        }
+
+    # ------------------------------------------------------------------
+    # Confident learning: label issues from out-of-sample predicted probs
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _label_issue_inputs(
+        labels: "Sequence[int] | np.ndarray", pred_probs: "np.ndarray"
+    ) -> tuple[np.ndarray, np.ndarray]:
+        y = np.asarray(labels)
+        P = np.asarray(pred_probs, dtype=float)
+        if P.ndim != 2 or P.shape[1] < 2:
+            raise ValueError("pred_probs must be a 2-D array with at least two class columns")
+        if y.ndim != 1 or len(y) != P.shape[0]:
+            raise ValueError("labels must be 1-D with one entry per pred_probs row")
+        if len(y) == 0:
+            raise ValueError("at least one example is required")
+        if not np.all(np.isfinite(P)) or np.any(P < 0):
+            raise ValueError("pred_probs must be finite and non-negative")
+        if not np.issubdtype(y.dtype, np.integer):
+            if np.any(np.asarray(y, dtype=float) % 1 != 0):
+                raise ValueError("labels must be integer class indices")
+            y = y.astype(int)
+        if y.min() < 0 or y.max() >= P.shape[1]:
+            raise ValueError("labels must be class indices in [0, n_classes)")
+        sums = P.sum(axis=1, keepdims=True)
+        if np.any(sums <= 0):
+            raise ValueError("every pred_probs row must have positive mass")
+        return y.astype(int), P / sums
+
+    @staticmethod
+    def _round_preserving_sum(values: "np.ndarray") -> np.ndarray:
+        """Round floats to integers while keeping their (rounded) sum."""
+        floats = np.asarray(values, dtype=float)
+        ints = floats.round()
+        target = float(np.round(floats.sum()))
+        while abs(ints.sum() - target) > 1e-6:
+            diff = target - ints.sum()
+            step = 1.0 if diff > 0 else -1.0
+            changes = min(int(round(abs(diff))), len(floats))
+            order = np.argsort(floats - ints)
+            order = order[::-1] if step > 0 else order
+            ints[order[:changes]] += step
+        return ints
+
+    @staticmethod
+    def confident_joint(
+        labels: "Sequence[int] | np.ndarray",
+        pred_probs: "np.ndarray",
+        *,
+        calibrate: bool = True,
+    ) -> dict[str, object]:
+        """Estimate the joint of given and latent true labels (Northcutt et al., 2021).
+
+        ``pred_probs`` must be *out-of-sample* (e.g. cross-validated) class
+        probabilities. The per-class threshold ``t_j`` is the mean predicted
+        probability of class ``j`` over examples labelled ``j``. Example ``i``
+        is counted in cell ``C[y_i, j]`` where ``j`` is the class with
+        ``p_ij >= t_j`` (the overall argmax when several classes clear their
+        threshold); examples with no class above
+        threshold are not counted. With ``calibrate=True`` each row is rescaled
+        to the observed count of its given label and rounded to integers
+        preserving row totals (largest-remainder), so ``C.sum() == n``. This
+        reproduces ``cleanlab.count.compute_confident_joint`` /
+        ``calibrate_confident_joint``.
+
+        Returns ``joint`` (K x K counts), ``thresholds``, ``latent`` (class
+        index per example or -1), ``noise_matrix`` ``P(given=i | true=j)``,
+        ``inverse_noise_matrix`` ``P(true=j | given=i)`` and
+        ``noise_rate`` = estimated share of mislabelled examples.
+        """
+        y, P = DatasetAuditor._label_issue_inputs(labels, pred_probs)
+        n, k = P.shape
+        counts = np.bincount(y, minlength=k).astype(float)
+        thresholds = np.full(k, np.nan)
+        for j in range(k):
+            if counts[j] > 0:
+                thresholds[j] = float(P[y == j, j].mean())
+        # classes never given as a label cannot be "confidently" assigned
+        thr = np.where(np.isnan(thresholds), np.inf, thresholds)
+        # small tolerance so p_ij == t_j (e.g. constant predictions) counts
+        above = P >= thr[None, :] - 1e-6
+        n_above = above.sum(axis=1)
+        # one confident class -> that class; several -> the overall argmax
+        latent = np.where(n_above > 1, P.argmax(axis=1), above.argmax(axis=1))
+        latent[n_above == 0] = -1
+        ok = latent >= 0
+        # built as (true x given) and transposed, the same memory layout as
+        # cleanlab's confusion_matrix(...).T, so float rounding ties in the
+        # calibration below break identically
+        joint_t = np.zeros((k, k), dtype=np.int64)
+        np.add.at(joint_t, (latent[ok], y[ok]), 1)
+        joint = joint_t.T
+        # every class keeps at least one confidently-correct example
+        np.fill_diagonal(joint, np.maximum(np.diag(joint), 1))
+        raw = joint.astype(float)
+        if calibrate:
+            # diagonal >= 1, so every row sum is positive
+            joint = (joint.T / joint.sum(axis=1) * counts).T
+            joint = joint / joint.sum() * counts.sum()
+            joint = np.vstack([DatasetAuditor._round_preserving_sum(r) for r in joint])
+        joint = np.asarray(joint, dtype=float)
+        col = joint.sum(axis=0)
+        row = joint.sum(axis=1)
+        noise = np.divide(joint, col[None, :], out=np.zeros_like(joint), where=col[None, :] > 0)
+        inverse = np.divide(joint, row[:, None], out=np.zeros_like(joint), where=row[:, None] > 0)
+        noise_rate = float(1.0 - np.trace(joint) / joint.sum()) if joint.sum() > 0 else 0.0
+        return {
+            "joint": joint,
+            "raw_joint": raw,
+            "thresholds": thresholds,
+            "latent": latent,
+            "noise_matrix": noise,
+            "inverse_noise_matrix": inverse,
+            "noise_rate": noise_rate,
+        }
+
+    @staticmethod
+    def find_label_issues(
+        labels: "Sequence[int] | np.ndarray",
+        pred_probs: "np.ndarray",
+        *,
+        method: str = DEFAULT_LABEL_ISSUE_METHOD,
+    ) -> np.ndarray:
+        """Boolean mask of likely label errors via confident learning.
+
+        ``method``:
+
+        * ``"confident_joint"`` - off-diagonal examples of the confident joint
+          (``latent != given``).
+        * ``"prune_by_noise_rate"`` - for each off-diagonal cell ``(i, j)``,
+          flag the ``C[i, j]`` examples labelled ``i`` with the largest
+          margin ``p_ij - p_ii`` (cells may flag the same example).
+        * ``"prune_by_class"`` - for each class ``i``, flag the
+          ``n_i - round(C[i, i])`` examples labelled ``i`` with the lowest
+          self-confidence ``p_ii``.
+        * ``"both"`` - intersection of the two pruning rules.
+
+        Examples whose predicted class (argmax) equals the given label are
+        never flagged. With the same inputs the mask equals
+        ``cleanlab.filter.find_label_issues(labels, pred_probs, filter_by=...)``
+        (``"confident_joint"`` corresponds to ``"confident_learning"``).
+        """
+        if method not in LABEL_ISSUE_METHODS:
+            raise ValueError(f"method must be one of {LABEL_ISSUE_METHODS}")
+        y, P = DatasetAuditor._label_issue_inputs(labels, pred_probs)
+        n, k = P.shape
+        cj = DatasetAuditor.confident_joint(y, P, calibrate=True)
+        # an example the model itself predicts as its given label is never
+        # flagged (cleanlab's _reduce_issues)
+        bumped = P.copy()
+        bumped[np.arange(n), y] += 1e-6
+        agrees = bumped.argmax(axis=1) == y
+        if method == "confident_joint":
+            latent = cj["latent"]
+            return (latent >= 0) & (latent != y) & ~agrees
+        joint = np.asarray(cj["joint"])
+        self_conf = P[np.arange(n), y]
+
+        # prune counts: transpose of the joint (rows = true, cols = given),
+        # with every class keeping at least one example (cleanlab's
+        # _keep_at_least_n_per_class with n=1)
+        prune = joint.T.copy()
+        diag = np.diag(prune).copy()
+        new_diag = np.maximum(diag, 1.0)
+        per_col = np.maximum(np.count_nonzero(prune, axis=0) - 1.0, 1.0)
+        prune = prune - (new_diag - diag)[None, :] / per_col[None, :]
+        prune[prune < 0] = 0.0
+        np.fill_diagonal(prune, new_diag)
+        prune = np.vstack([DatasetAuditor._round_preserving_sum(r) for r in prune])
+
+        def by_noise_rate() -> np.ndarray:
+            mask = np.zeros(n, dtype=bool)
+            for i in range(k):
+                idx = np.where(y == i)[0]
+                if len(idx) <= 1:
+                    continue
+                for j in range(k):
+                    m = int(prune[j, i])
+                    if j == i or m <= 0:
+                        continue
+                    margin = P[idx, j] - P[idx, i]
+                    mask[idx[np.argsort(-margin, kind="stable")[:m]]] = True
+            return mask
+
+        def by_class() -> np.ndarray:
+            mask = np.zeros(n, dtype=bool)
+            for i in range(k):
+                idx = np.where(y == i)[0]
+                if len(idx) <= 1:
+                    continue
+                m = len(idx) - int(prune[i, i])
+                if m <= 0:
+                    continue
+                order = np.argsort(self_conf[idx], kind="stable")
+                mask[idx[order[:m]]] = True
+            return mask
+
+        if method == "prune_by_noise_rate":
+            return by_noise_rate() & ~agrees
+        if method == "prune_by_class":
+            return by_class() & ~agrees
+        return by_noise_rate() & by_class() & ~agrees
+
+    def label_issues_report(
+        self,
+        data: pd.DataFrame,
+        label_column: str,
+        pred_probs: "np.ndarray | pd.DataFrame",
+        *,
+        classes: Sequence[object] | None = None,
+        method: str = DEFAULT_LABEL_ISSUE_METHOD,
+        top: int = 20,
+    ) -> dict[str, object]:
+        """Find rows whose label is likely wrong using confident learning.
+
+        ``pred_probs`` holds out-of-sample class probabilities, one row per row
+        of ``data``. When it is a DataFrame its column names are the class
+        values; otherwise ``classes`` gives the column order (default: sorted
+        unique labels). Returns the estimated noise rate, calibrated confident
+        joint, per-class thresholds and the ``top`` issues ranked by
+        normalized margin ``p_given - max_{j != given} p_j`` (most suspicious
+        first), each with a suggested label.
+        """
+        if label_column not in data.columns:
+            raise ValueError(f"label column {label_column!r} not found")
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if isinstance(pred_probs, pd.DataFrame):
+            if classes is not None and list(map(str, classes)) != list(map(str, pred_probs.columns)):
+                raise ValueError("classes must match pred_probs columns")
+            class_list = list(pred_probs.columns)
+            P = pred_probs.to_numpy(dtype=float)
+        else:
+            P = np.asarray(pred_probs, dtype=float)
+            if classes is None:
+                class_list = sorted(pd.unique(data[label_column].dropna()), key=lambda v: (str(type(v)), v))
+            else:
+                class_list = list(classes)
+        if P.ndim != 2 or P.shape[0] != len(data):
+            raise ValueError("pred_probs must have one row per data row")
+        if P.shape[1] != len(class_list):
+            raise ValueError("pred_probs must have one column per class")
+        if data[label_column].isna().any():
+            raise ValueError("label column contains missing values")
+        lookup = {str(c): i for i, c in enumerate(class_list)}
+        raw_labels = data[label_column].tolist()
+        unknown = sorted({str(v) for v in raw_labels if str(v) not in lookup})
+        if unknown:
+            raise ValueError(f"labels not among classes: {unknown[:5]}")
+        y = np.array([lookup[str(v)] for v in raw_labels], dtype=int)
+        y, Pn = self._label_issue_inputs(y, P)
+        cj = self.confident_joint(y, Pn)
+        mask = self.find_label_issues(y, Pn, method=method)
+        n = len(y)
+        self_conf = Pn[np.arange(n), y]
+        others = Pn.copy()
+        others[np.arange(n), y] = -np.inf
+        best_other = others.argmax(axis=1)
+        margin = self_conf - others[np.arange(n), best_other]
+        issue_idx = np.where(mask)[0]
+        issue_idx = issue_idx[np.argsort(margin[issue_idx], kind="stable")]
+        index = list(data.index)
+
+        def plain(v: object) -> object:
+            return v.item() if hasattr(v, "item") else v
+
+        issues = [
+            {
+                "index": plain(index[i]),
+                "given_label": plain(class_list[y[i]]),
+                "suggested_label": plain(class_list[best_other[i]]),
+                "self_confidence": round(float(self_conf[i]), 6),
+                "normalized_margin": round(float(margin[i]), 6),
+            }
+            for i in issue_idx[:top]
+        ]
+        joint = np.asarray(cj["joint"])
+        per_class = [
+            {
+                "label": plain(c),
+                "n": int((y == i).sum()),
+                "threshold": None if np.isnan(cj["thresholds"][i]) else round(float(cj["thresholds"][i]), 6),
+                "n_issues": int(mask[y == i].sum()),
+                "estimated_noise": round(float(1.0 - joint[i, i] / joint[i].sum()), 6) if joint[i].sum() > 0 else 0.0,
+            }
+            for i, c in enumerate(class_list)
+        ]
+        return {
+            "n_rows": n,
+            "classes": [plain(c) for c in class_list],
+            "method": method,
+            "noise_rate": round(float(cj["noise_rate"]), 6),
+            "n_issues": int(mask.sum()),
+            "issue_share": round(float(mask.mean()), 6),
+            "confident_joint": [[round(float(v), 4) for v in row] for row in joint],
+            "per_class": per_class,
+            "issues": issues,
         }
