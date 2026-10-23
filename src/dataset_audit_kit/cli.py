@@ -18,6 +18,9 @@ from .core import (
     DEFAULT_FD_MAX_G3,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     DEFAULT_MCAR_ALPHA,
+    DEFAULT_PRIVACY_K,
+    DEFAULT_PRIVACY_L,
+    DEFAULT_PRIVACY_T,
     DEFAULT_LABEL_ISSUE_METHOD,
     LABEL_ISSUE_METHODS,
     DEFAULT_TARGET_ENCODING_LEAKAGE_THRESHOLD,
@@ -822,6 +825,20 @@ def build_parser() -> argparse.ArgumentParser:
     li_parser.add_argument("--top", type=int, default=20, help="Issues to list (default: 20)")
     li_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     li_parser.add_argument("--fail-on-issues", action="store_true", help="Exit 1 if any label issue is found")
+
+    privacy_parser = subparsers.add_parser(
+        "privacy",
+        help="Re-identification audit: k-anonymity, l-diversity and t-closeness over quasi-identifiers",
+    )
+    privacy_parser.add_argument("data", help="Path to the dataset")
+    privacy_parser.add_argument("--qi", required=True, help="Comma-separated quasi-identifier columns")
+    privacy_parser.add_argument("--sensitive", default=None, help="Comma-separated sensitive columns")
+    privacy_parser.add_argument("--k", type=int, default=DEFAULT_PRIVACY_K, help=f"Required k (default: {DEFAULT_PRIVACY_K})")
+    privacy_parser.add_argument("--l", type=float, default=DEFAULT_PRIVACY_L, help=f"Required l (default: {DEFAULT_PRIVACY_L})")
+    privacy_parser.add_argument("--t", type=float, default=DEFAULT_PRIVACY_T, help=f"Required t (default: {DEFAULT_PRIVACY_T})")
+    privacy_parser.add_argument("--top", type=int, default=10, help="Riskiest equivalence classes to list (default: 10)")
+    privacy_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    privacy_parser.add_argument("--fail-on-violation", action="store_true", help="Exit 1 if k, l or t is not satisfied")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -1993,6 +2010,58 @@ def _cmd_label_issues(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_privacy(args: argparse.Namespace) -> int:
+    """Handle the privacy subcommand (k-anonymity / l-diversity / t-closeness)."""
+    import json
+
+    data = _load(args)
+    qi = [c.strip() for c in args.qi.split(",") if c.strip()]
+    sensitive = [c.strip() for c in args.sensitive.split(",") if c.strip()] if args.sensitive else None
+    try:
+        result = DatasetAuditor().privacy_risk_report(
+            data, qi, sensitive=sensitive, k=args.k, l=args.l, t=args.t, top=args.top
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"{result['n_rows']} row(s) in {result['n_classes']} equivalence class(es) over "
+            f"{', '.join(result['quasi_identifiers'])}"
+        )
+        print(
+            f"k-anonymity: {result['k_anonymity']} (required {result['k']}: "
+            f"{'ok' if result['satisfies_k'] else 'VIOLATED'}); "
+            f"{result['n_violating_rows']} row(s) in classes smaller than k "
+            f"({result['violating_share']:.2%}); {result['n_unique_rows']} unique row(s)"
+        )
+        print(
+            f"Prosecutor re-identification risk: max {result['prosecutor_risk_max']:.4f}, "
+            f"mean {result['prosecutor_risk_mean']:.4f}"
+        )
+        if result["sensitive"]:
+            _render_table(pd.DataFrame(result["sensitive"]), "table")
+        if result["classes"]:
+            print("Riskiest equivalence classes (smallest first):")
+            table = pd.DataFrame(
+                [
+                    {
+                        **{f"qi:{k}": v for k, v in c["quasi_identifiers"].items()},
+                        "size": c["size"],
+                        "risk": c["risk"],
+                        "violates_k": "yes" if c["violates_k"] else "no",
+                    }
+                    for c in result["classes"]
+                ]
+            )
+            _render_table(table, "table")
+    if args.fail_on_violation and not result["satisfies_all"]:
+        return 1
+    return 0
+
+
 def _cmd_refs(args: argparse.Namespace) -> int:
     """Handle the refs subcommand."""
     child = _load(args)
@@ -3017,5 +3086,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_mcar(args)
     elif args.command == "label-issues":
         return _cmd_label_issues(args)
+    elif args.command == "privacy":
+        return _cmd_privacy(args)
     else:
         parser.error("unsupported command")

@@ -76,6 +76,9 @@ DEFAULT_FD_MAX_G3 = 0.01
 DEFAULT_FD_MAX_DETERMINANT_RATIO = 0.5
 #: Significance level for Little's MCAR test.
 DEFAULT_MCAR_ALPHA = 0.05
+DEFAULT_PRIVACY_K = 5
+DEFAULT_PRIVACY_L = 2.0
+DEFAULT_PRIVACY_T = 0.2
 #: EM iterations for the MCAR test's mean / covariance estimate.
 DEFAULT_MCAR_MAX_ITER = 500
 #: Pruning rule used by the confident-learning label-issue audit.
@@ -7696,4 +7699,225 @@ class DatasetAuditor:
             "confident_joint": [[round(float(v), 4) for v in row] for row in joint],
             "per_class": per_class,
             "issues": issues,
+        }
+
+    @staticmethod
+    def t_closeness_distance(
+        class_distribution: "Sequence[float] | np.ndarray",
+        overall_distribution: "Sequence[float] | np.ndarray",
+        *,
+        ordered: bool = False,
+    ) -> float:
+        """Earth Mover's Distance used by t-closeness (Li, Li & Venkatasubramanian 2007).
+
+        Both inputs are probability vectors over the same support. With
+        ``ordered=True`` (numeric sensitive values sorted ascending) the
+        ordered-distance EMD is ``sum_i |sum_{j<=i} (p_j - q_j)| / (m - 1)``;
+        otherwise every pair of categories is at distance 1 and the EMD is the
+        total variation distance ``0.5 * sum_i |p_i - q_i|``. Result is in
+        ``[0, 1]``.
+        """
+        p = np.asarray(class_distribution, dtype=float).ravel()
+        q = np.asarray(overall_distribution, dtype=float).ravel()
+        if p.shape != q.shape:
+            raise ValueError("distributions must have the same length")
+        if p.size == 0:
+            raise ValueError("distributions must not be empty")
+        if (p < 0).any() or (q < 0).any():
+            raise ValueError("distributions must be non-negative")
+        ps, qs = p.sum(), q.sum()
+        if ps <= 0 or qs <= 0:
+            raise ValueError("distributions must have positive mass")
+        p, q = p / ps, q / qs
+        if not ordered:
+            return float(0.5 * np.abs(p - q).sum())
+        m = p.size
+        if m == 1:
+            return 0.0
+        return float(np.abs(np.cumsum(p - q)).sum() / (m - 1))
+
+    def privacy_risk_report(
+        self,
+        data: pd.DataFrame,
+        quasi_identifiers: Sequence[str],
+        *,
+        sensitive: "str | Sequence[str] | None" = None,
+        k: int = DEFAULT_PRIVACY_K,
+        l: float = DEFAULT_PRIVACY_L,
+        t: float = DEFAULT_PRIVACY_T,
+        top: int = 10,
+    ) -> dict[str, object]:
+        """Re-identification audit: k-anonymity, l-diversity and t-closeness.
+
+        Rows sharing the same quasi-identifier values (``age``, ``zip``,
+        ``sex`` ...) form an equivalence class; a linking attacker who knows a
+        person's quasi-identifiers can narrow them down to that class.
+
+        * **k-anonymity** (Sweeney 2002) is the smallest class size. Rows in
+          classes smaller than ``k`` are reported as violating, and the
+          prosecutor re-identification risk is ``1 / class size`` (max and
+          record-average ``n_classes / n_rows``).
+        * **distinct l-diversity** (Machanavajjhala et al. 2007) is the
+          smallest number of distinct sensitive values in a class;
+          **entropy l-diversity** is ``exp(min_class H(sensitive | class))``
+          (natural log), so ``entropy_l >= l`` iff every class has entropy at
+          least ``log(l)``.
+        * **t-closeness** (Li et al. 2007) is the largest Earth Mover's
+          Distance between a class's sensitive distribution and the whole
+          table's; numeric attributes use the ordered distance, others the
+          equal distance (see :meth:`t_closeness_distance`).
+
+        Missing quasi-identifier values form their own group value; missing
+        sensitive values are ignored for l-diversity and t-closeness.
+        ``classes`` lists the ``top`` riskiest classes (smallest first).
+        """
+        if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+            raise ValueError("k must be a positive integer")
+        if not isinstance(top, int) or isinstance(top, bool) or top < 0:
+            raise ValueError("top must be a non-negative integer")
+        if isinstance(l, bool) or not isinstance(l, (int, float)) or not l >= 1:
+            raise ValueError("l must be a number >= 1")
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0.0 <= float(t) <= 1.0:
+            raise ValueError("t must be a number between 0 and 1")
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if isinstance(quasi_identifiers, str):
+            quasi_identifiers = [quasi_identifiers]
+        qi = list(quasi_identifiers)
+        if not qi:
+            raise ValueError("at least one quasi-identifier is required")
+        if sensitive is None:
+            sens: list[str] = []
+        elif isinstance(sensitive, str):
+            sens = [sensitive]
+        else:
+            sens = list(sensitive)
+        unknown = [c for c in qi + sens if c not in frame.columns]
+        if unknown:
+            raise ValueError(f"unknown columns: {unknown}")
+        overlap = sorted(set(qi) & set(sens), key=str)
+        if overlap:
+            raise ValueError(f"columns cannot be both quasi-identifier and sensitive: {overlap}")
+        n = len(frame)
+        if n == 0:
+            raise ValueError("data must contain at least one row")
+
+        codes = frame.groupby(qi, sort=False, dropna=False).ngroup().to_numpy()
+        sizes = np.bincount(codes)
+        n_classes = int(sizes.size)
+        k_anon = int(sizes.min())
+        violating = sizes < k
+
+        def plain(v: object) -> object:
+            if v is None or (isinstance(v, float) and v != v):
+                return None
+            try:
+                if pd.isna(v):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            return v.item() if hasattr(v, "item") else v
+
+        first_row = np.zeros(n_classes, dtype=int)
+        seen = np.zeros(n_classes, dtype=bool)
+        for i, c in enumerate(codes):
+            if not seen[c]:
+                seen[c] = True
+                first_row[c] = i
+
+        per_class_sens: dict[str, dict[str, np.ndarray]] = {}
+        sensitive_rows: list[dict[str, object]] = []
+        for column in sens:
+            series = frame[column]
+            numeric = bool(
+                pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+            )
+            mask = series.notna().to_numpy()
+            values = series.to_numpy()[mask]
+            cls = codes[mask]
+            distinct = np.zeros(n_classes)
+            entropy_l = np.zeros(n_classes)
+            tdist = np.full(n_classes, np.nan)
+            if values.size:
+                if numeric:
+                    support, v_codes = np.unique(values.astype(float), return_inverse=True)
+                else:
+                    v_codes, support = pd.factorize(pd.Series(values), sort=False)
+                    v_codes = np.asarray(v_codes)
+                m = len(support)
+                table = np.zeros((n_classes, m))
+                np.add.at(table, (cls, v_codes), 1.0)
+                overall = table.sum(axis=0)
+                for c in range(n_classes):
+                    row = table[c]
+                    tot = row.sum()
+                    if tot <= 0:
+                        continue
+                    distinct[c] = float((row > 0).sum())
+                    pr = row[row > 0] / tot
+                    entropy_l[c] = float(np.exp(-(pr * np.log(pr)).sum()))
+                    tdist[c] = DatasetAuditor.t_closeness_distance(row, overall, ordered=numeric)
+            per_class_sens[column] = {"distinct": distinct, "entropy": entropy_l, "t": tdist}
+            observed = ~np.isnan(tdist)
+            t_max = float(np.nanmax(tdist)) if observed.any() else float("nan")
+            sensitive_rows.append(
+                {
+                    "attribute": str(column),
+                    "kind": "numeric" if numeric else "categorical",
+                    "distinct_l": int(distinct.min()),
+                    "entropy_l": round(float(entropy_l.min()), 6),
+                    "t_closeness": round(t_max, 6) if t_max == t_max else None,
+                    "classes_violating_l": int((distinct < float(l)).sum()),
+                    "classes_violating_entropy_l": int((entropy_l < float(l) - 1e-12).sum()),
+                    "classes_violating_t": int((tdist[observed] > float(t) + 1e-12).sum()),
+                    "satisfies_l": bool(distinct.min() >= float(l)),
+                    "satisfies_entropy_l": bool(entropy_l.min() >= float(l) - 1e-12),
+                    "satisfies_t": bool(t_max == t_max and t_max <= float(t) + 1e-12),
+                }
+            )
+
+        order = np.lexsort((np.arange(n_classes), sizes))
+        classes: list[dict[str, object]] = []
+        for c in order[:top]:
+            entry: dict[str, object] = {
+                "quasi_identifiers": {
+                    str(col): plain(frame[col].iloc[first_row[c]]) for col in qi
+                },
+                "size": int(sizes[c]),
+                "risk": round(1.0 / float(sizes[c]), 6),
+                "violates_k": bool(violating[c]),
+            }
+            for column in sens:
+                info = per_class_sens[column]
+                tv = info["t"][c]
+                entry[str(column)] = {
+                    "distinct_l": int(info["distinct"][c]),
+                    "entropy_l": round(float(info["entropy"][c]), 6),
+                    "t": None if tv != tv else round(float(tv), 6),
+                }
+            classes.append(entry)
+
+        satisfies_k = bool(k_anon >= k)
+        satisfies_all = satisfies_k and all(
+            r["satisfies_l"] and r["satisfies_entropy_l"] and r["satisfies_t"] for r in sensitive_rows
+        )
+        n_violating_rows = int(sizes[violating].sum())
+        return {
+            "n_rows": int(n),
+            "quasi_identifiers": [str(c) for c in qi],
+            "k": int(k),
+            "l": float(l),
+            "t": float(t),
+            "n_classes": n_classes,
+            "k_anonymity": k_anon,
+            "satisfies_k": satisfies_k,
+            "n_violating_classes": int(violating.sum()),
+            "n_violating_rows": n_violating_rows,
+            "violating_share": round(n_violating_rows / n, 6),
+            "n_unique_rows": int((sizes == 1).sum()),
+            "unique_share": round(float((sizes == 1).sum()) / n, 6),
+            "prosecutor_risk_max": round(1.0 / k_anon, 6),
+            "prosecutor_risk_mean": round(n_classes / n, 6),
+            "sensitive": sensitive_rows,
+            "satisfies_all": satisfies_all,
+            "classes": classes,
         }

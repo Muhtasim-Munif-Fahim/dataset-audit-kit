@@ -38,11 +38,30 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
 - **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
 - **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
+- **Privacy / re-identification audit**: k-anonymity, distinct and entropy l-diversity, and t-closeness (Earth Mover's Distance) over quasi-identifiers via the `privacy` CLI, with prosecutor re-identification risk and the riskiest equivalence classes.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
 - JSON, Markdown, and HTML report output.
 - CLI and notebook demo paths for documentation and review.
+
+### Re-identification risk (`privacy`)
+
+Before sharing a dataset, check how easily a person can be singled out from their **quasi-identifiers** (age, zip, sex, ...). Rows with identical quasi-identifier values form an equivalence class:
+
+- **k-anonymity** (Sweeney 2002) is the smallest class size; rows in classes smaller than `--k` are flagged and the prosecutor re-identification risk is `1 / class size`.
+- **l-diversity** (Machanavajjhala et al. 2007): distinct l is the fewest distinct sensitive values in any class; entropy l is `exp(min class entropy)`.
+- **t-closeness** (Li et al. 2007): the largest Earth Mover's Distance between a class's sensitive distribution and the whole table's (ordered distance for numeric attributes, equal distance otherwise).
+
+```bash
+dataset-audit-kit privacy data.csv --qi age,zip,sex --sensitive diagnosis --k 5 --l 2 --t 0.2
+dataset-audit-kit privacy data.csv --qi age,zip --sensitive salary,diagnosis --json --fail-on-violation
+```
+
+```python
+res = DatasetAuditor().privacy_risk_report(df, ["age", "zip"], sensitive="diagnosis", k=5)
+d = DatasetAuditor.t_closeness_distance(class_counts, overall_counts, ordered=True)
+```
 
 ### Functional dependencies (`fd`)
 
