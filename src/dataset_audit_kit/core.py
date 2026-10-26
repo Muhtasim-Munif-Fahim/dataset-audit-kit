@@ -83,6 +83,12 @@ DEFAULT_PRIVACY_T = 0.2
 DEFAULT_MCAR_MAX_ITER = 500
 #: Pruning rule used by the confident-learning label-issue audit.
 DEFAULT_LABEL_ISSUE_METHOD = "prune_by_noise_rate"
+#: Out-of-fold domain-classifier AUC at or above which adversarial validation
+#: flags the two datasets as distinguishable (0.5 = indistinguishable).
+DEFAULT_ADVERSARIAL_AUC_THRESHOLD = 0.6
+#: Most frequent levels one-hot encoded per categorical column in
+#: adversarial validation; the rest share an "other" indicator.
+DEFAULT_ADVERSARIAL_MAX_LEVELS = 20
 LABEL_ISSUE_METHODS = ("confident_joint", "prune_by_noise_rate", "prune_by_class", "both")
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
@@ -7920,4 +7926,257 @@ class DatasetAuditor:
             "sensitive": sensitive_rows,
             "satisfies_all": satisfies_all,
             "classes": classes,
+        }
+
+    # ------------------------------------------------------------------
+    # Adversarial validation (domain classifier between two datasets)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def rank_auc(labels: "Sequence[int] | np.ndarray", scores: "Sequence[float] | np.ndarray") -> float:
+        """ROC AUC via the Mann-Whitney U statistic (ties count one half)."""
+        y = np.asarray(labels).astype(bool).ravel()
+        s = np.asarray(scores, dtype=float).ravel()
+        if y.shape != s.shape:
+            raise ValueError("labels and scores must have the same length")
+        n_pos = int(y.sum())
+        n_neg = int(y.size - n_pos)
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError("AUC needs both positive and negative labels")
+        ranks = pd.Series(s).rank(method="average").to_numpy()
+        u = ranks[y].sum() - n_pos * (n_pos + 1) / 2.0
+        return float(u / (n_pos * n_neg))
+
+    @staticmethod
+    def _adversarial_design(
+        pooled: pd.DataFrame, columns: Sequence[str], max_levels: int
+    ) -> tuple[np.ndarray, list[str], list[int]]:
+        """Standardised numeric + one-hot categorical design; the list names each feature's source column."""
+        blocks: list[np.ndarray] = []
+        owners: list[str] = []
+        numeric_idx: list[int] = []
+        for col in columns:
+            series = pooled[col]
+            if pd.api.types.is_bool_dtype(series):
+                series = series.astype("object")
+            if pd.api.types.is_datetime64_any_dtype(series):
+                stamps = series
+                if getattr(stamps.dt, "tz", None) is not None:
+                    stamps = stamps.dt.tz_convert("UTC").dt.tz_localize(None)
+                seconds = (stamps - pd.Timestamp("1970-01-01")) / pd.Timedelta(seconds=1)
+                series = seconds.astype(float)
+            if pd.api.types.is_numeric_dtype(series):
+                values = series.to_numpy(dtype=float)
+                missing = ~np.isfinite(values)
+                if missing.all():
+                    continue
+                fill = float(np.nanmedian(np.where(missing, np.nan, values)))
+                values = np.where(missing, fill, values)
+                std = values.std()
+                if std > 0:
+                    numeric_idx.append(len(blocks))
+                    blocks.append(((values - values.mean()) / std)[:, None])
+                    owners.append(str(col))
+                if missing.any() and not missing.all():
+                    ind = missing.astype(float)
+                    blocks.append(((ind - ind.mean()) / ind.std())[:, None])
+                    owners.append(str(col))
+                continue
+            text = series.astype("object").where(series.notna(), "<missing>").astype(str)
+            counts = text.value_counts()
+            if counts.size < 2:
+                continue
+            levels = list(counts.index[:max_levels])
+            cols = [(text == lvl).to_numpy(dtype=float) for lvl in levels]
+            if counts.size > max_levels:
+                cols.append((~text.isin(levels)).to_numpy(dtype=float))
+            for c in cols:
+                sd = c.std()
+                if sd > 0:
+                    blocks.append(((c - c.mean()) / sd)[:, None])
+                    owners.append(str(col))
+        if not blocks:
+            return np.zeros((len(pooled), 0)), [], []
+        return np.hstack(blocks), owners, numeric_idx
+
+    @staticmethod
+    def _fit_logistic(X: np.ndarray, y: np.ndarray, l2: float, max_iter: int = 50) -> np.ndarray:
+        """L2-penalised logistic regression by Newton-Raphson; returns [intercept, coef...]."""
+        n, d = X.shape
+        Xb = np.hstack([np.ones((n, 1)), X])
+        w = np.zeros(d + 1)
+        penalty = np.full(d + 1, float(l2))
+        penalty[0] = 0.0
+        for _ in range(max_iter):
+            z = np.clip(Xb @ w, -35.0, 35.0)
+            p = 1.0 / (1.0 + np.exp(-z))
+            grad = Xb.T @ (p - y) + penalty * w
+            hess = (Xb * (p * (1.0 - p))[:, None]).T @ Xb + np.diag(penalty + 1e-9)
+            step = np.linalg.solve(hess, grad)
+            w -= step
+            if np.max(np.abs(step)) < 1e-8:
+                break
+        return w
+
+    @staticmethod
+    def _oof_scores(X: np.ndarray, y: np.ndarray, folds: int, l2: float, rng: np.random.Generator) -> np.ndarray:
+        """Stratified out-of-fold P(current) for every pooled row."""
+        fold_of = np.empty(y.size, dtype=int)
+        for cls in (0, 1):
+            idx = np.flatnonzero(y == cls)
+            idx = idx[rng.permutation(idx.size)]
+            fold_of[idx] = np.arange(idx.size) % folds
+        scores = np.empty(y.size)
+        for f in range(folds):
+            test = fold_of == f
+            w = DatasetAuditor._fit_logistic(X[~test], y[~test], l2)
+            z = np.clip(w[0] + X[test] @ w[1:], -35.0, 35.0)
+            scores[test] = 1.0 / (1.0 + np.exp(-z))
+        return scores
+
+    def adversarial_validation(
+        self,
+        data: pd.DataFrame,
+        reference: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        folds: int = 5,
+        l2: float = 1.0,
+        max_levels: int = DEFAULT_ADVERSARIAL_MAX_LEVELS,
+        interactions: bool = False,
+        auc_threshold: float = DEFAULT_ADVERSARIAL_AUC_THRESHOLD,
+        n_permutations: int = 0,
+        top: int = 10,
+        seed: int = 0,
+    ) -> dict[str, object]:
+        """Can a classifier tell ``data`` (current) rows from ``reference`` rows?
+
+        Adversarial validation trains a *domain classifier* on the pooled
+        rows, labelled 1 for ``data`` and 0 for ``reference``. Per-column
+        drift tests look at one marginal at a time; the classifier looks at
+        all columns jointly. It is an L2-penalised logistic regression on
+        standardised numeric columns (median-imputed plus a missing
+        indicator), one-hot categorical levels (top ``max_levels`` plus
+        "other") and datetimes as numbers. A linear model only sees shifts in
+        location; ``interactions=True`` adds squares and pairwise products of
+        the numeric columns so changes in spread and correlation are caught
+        too (a product's coefficient counts half towards each column's
+        ``importance``).
+
+        Returns a dict with:
+
+        * ``auc`` - stratified ``folds``-fold out-of-fold ROC AUC. About 0.5
+          means the datasets are exchangeable; 1.0 means perfectly separable.
+          ``drifted`` is ``auc >= auc_threshold``.
+        * ``p_value`` - with ``n_permutations > 0``, the permutation p-value
+          ``(1 + #{AUC_perm >= AUC}) / (1 + B)`` from shuffling domain labels.
+        * ``columns`` - for every used column, its ``solo_auc`` (the same
+          classifier on that column alone, with its square under
+          ``interactions``) and ``importance`` (sum of
+          absolute standardised coefficients in the full model), sorted by
+          ``solo_auc``. A column with ``solo_auc`` near 1 (an id, a
+          timestamp) leaks the split by itself.
+        * ``reference_most_like_current`` - indices of the ``top`` reference
+          rows with the highest out-of-fold P(current); a common way to build
+          a validation set that resembles the test set.
+        """
+        if not isinstance(folds, (int, np.integer)) or folds < 2:
+            raise ValueError("folds must be an integer >= 2")
+        if l2 < 0:
+            raise ValueError("l2 must be non-negative")
+        if max_levels < 1:
+            raise ValueError("max_levels must be >= 1")
+        if n_permutations < 0:
+            raise ValueError("n_permutations must be >= 0")
+        if len(data) < folds or len(reference) < folds:
+            raise ValueError(f"each dataset needs at least {folds} rows (one per fold)")
+        shared = [c for c in data.columns if c in set(reference.columns)]
+        if columns is not None:
+            missing = [c for c in columns if c not in shared]
+            if missing:
+                raise ValueError(f"columns not present in both datasets: {missing}")
+            shared = [c for c in shared if c in set(columns)]
+        if exclude:
+            shared = [c for c in shared if c not in set(exclude)]
+        if not shared:
+            raise ValueError("no shared columns to compare")
+        def _naive(frame: pd.DataFrame) -> pd.DataFrame:
+            # Mixed tz-aware / naive datetimes would concatenate to object.
+            frame = frame[shared].reset_index(drop=True)
+            for col in shared:
+                if isinstance(frame[col].dtype, pd.DatetimeTZDtype):
+                    frame[col] = frame[col].dt.tz_convert("UTC").dt.tz_localize(None)
+            return frame
+
+        pooled = pd.concat([_naive(data), _naive(reference)], ignore_index=True)
+        y = np.r_[np.ones(len(data)), np.zeros(len(reference))]
+        X, owners, numeric_idx = self._adversarial_design(pooled, shared, max_levels)
+        if X.shape[1] == 0:
+            raise ValueError("no informative (non-constant) columns to compare")
+        used = list(dict.fromkeys(owners))
+        groups: list[tuple[str, ...]] = [(o,) for o in owners]
+        if interactions and numeric_idx:
+            extra = []
+            for a_pos, a in enumerate(numeric_idx):
+                for b in numeric_idx[a_pos:]:
+                    prod = X[:, a] * X[:, b]
+                    sd = prod.std()
+                    if sd > 0:
+                        extra.append(((prod - prod.mean()) / sd)[:, None])
+                        groups.append((owners[a],) if a == b else (owners[a], owners[b]))
+            if extra:
+                X = np.hstack([X] + extra)
+        rng = np.random.default_rng(seed)
+        oof = self._oof_scores(X, y, folds, l2, rng)
+        auc = self.rank_auc(y, oof)
+
+        p_value = None
+        if n_permutations:
+            exceed = 0
+            for _ in range(int(n_permutations)):
+                yp = rng.permutation(y)
+                if self.rank_auc(yp, self._oof_scores(X, yp, folds, l2, rng)) >= auc:
+                    exceed += 1
+            p_value = (1 + exceed) / (1 + int(n_permutations))
+
+        w = self._fit_logistic(X, y, l2)
+        per_column = []
+        coef = np.abs(w[1:])
+        for col in used:
+            solo_mask = np.array([g == (col,) for g in groups])
+            share = np.array([g.count(col) / len(g) for g in groups])
+            solo = self._oof_scores(X[:, solo_mask], y, folds, l2, np.random.default_rng(seed))
+            per_column.append(
+                {
+                    "column": col,
+                    "n_features": int(solo_mask.sum()),
+                    "solo_auc": round(self.rank_auc(y, solo), 6),
+                    "importance": round(float((coef * share).sum()), 6),
+                }
+            )
+        per_column.sort(key=lambda r: (-r["solo_auc"], -r["importance"], r["column"]))
+        ignored = [str(c) for c in shared if str(c) not in set(used)]
+
+        ref_scores = oof[len(data):]
+        order = np.argsort(-ref_scores, kind="stable")[: max(int(top), 0)]
+        ref_index = reference.index.to_numpy()
+        most_like = [
+            {"index": ref_index[i].item() if hasattr(ref_index[i], "item") else ref_index[i],
+             "p_current": round(float(ref_scores[i]), 6)}
+            for i in order
+        ]
+        return {
+            "n_current": int(len(data)),
+            "n_reference": int(len(reference)),
+            "n_features": int(X.shape[1]),
+            "interactions": bool(interactions),
+            "folds": int(folds),
+            "auc": round(auc, 6),
+            "auc_threshold": float(auc_threshold),
+            "drifted": bool(auc >= auc_threshold),
+            "p_value": None if p_value is None else round(float(p_value), 6),
+            "n_permutations": int(n_permutations),
+            "columns": per_column,
+            "ignored_columns": ignored,
+            "reference_most_like_current": most_like,
         }
