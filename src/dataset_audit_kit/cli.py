@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Sequence
 
 from .core import (
+    DEFAULT_ADVERSARIAL_AUC_THRESHOLD,
+    DEFAULT_ADVERSARIAL_MAX_LEVELS,
     DEFAULT_ASSOCIATION_MAX_LEVELS,
     DEFAULT_CRAMERS_V_THRESHOLD,
     DEFAULT_FD_MAX_DETERMINANT_RATIO,
@@ -734,6 +736,31 @@ def build_parser() -> argparse.ArgumentParser:
     distance_parser.add_argument("--top", type=int, default=20, help="Maximum number of columns to show (default: 20)")
     distance_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     distance_parser.add_argument("--fail-on-drift", action="store_true", help="Exit 1 if any column is flagged")
+
+    adv_parser = subparsers.add_parser(
+        "adversarial",
+        help="Adversarial validation: can a domain classifier tell current rows from reference rows?",
+    )
+    adv_parser.add_argument("data", help="Path to the current dataset")
+    adv_parser.add_argument("--reference", required=True, help="Path to the reference dataset")
+    adv_parser.add_argument("--columns", default=None, help="Comma-separated column names (default: every shared column)")
+    adv_parser.add_argument("--exclude", default=None, help="Comma-separated columns to leave out (ids, timestamps, targets)")
+    adv_parser.add_argument("--folds", type=int, default=5, help="Stratified cross-validation folds (default: 5)")
+    adv_parser.add_argument("--l2", type=float, default=1.0, help="L2 penalty of the logistic domain classifier (default: 1.0)")
+    adv_parser.add_argument(
+        "--max-levels", type=int, default=DEFAULT_ADVERSARIAL_MAX_LEVELS,
+        help=f"One-hot levels per categorical column (default: {DEFAULT_ADVERSARIAL_MAX_LEVELS})",
+    )
+    adv_parser.add_argument("--interactions", action="store_true", help="Add squares and pairwise products of numeric columns")
+    adv_parser.add_argument(
+        "--threshold", type=float, default=DEFAULT_ADVERSARIAL_AUC_THRESHOLD,
+        help=f"Out-of-fold AUC at or above which the datasets are flagged (default: {DEFAULT_ADVERSARIAL_AUC_THRESHOLD})",
+    )
+    adv_parser.add_argument("--permutations", type=int, default=0, help="Label permutations for a p-value (default: 0 = off)")
+    adv_parser.add_argument("--top", type=int, default=10, help="Reference rows most like the current data to list (default: 10)")
+    adv_parser.add_argument("--seed", type=int, default=0, help="Random seed for folds and permutations (default: 0)")
+    adv_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    adv_parser.add_argument("--fail-on-shift", action="store_true", help="Exit 1 if the AUC reaches --threshold")
 
     associate_parser = subparsers.add_parser(
         "associate",
@@ -1844,6 +1871,70 @@ def _cmd_distance(args: argparse.Namespace) -> int:
         return 1
     return 0
 
+
+def _cmd_adversarial(args: argparse.Namespace) -> int:
+    """Handle the adversarial subcommand (domain-classifier AUC)."""
+    import json
+
+    data = _load(args)
+    try:
+        reference = DatasetAuditor.load_dataframe(
+            args.reference,
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Cannot read reference dataset '{args.reference}': {exc}", file=sys.stderr)
+        return 2
+
+    def _split(text: str | None) -> list[str] | None:
+        return [c.strip() for c in text.split(",") if c.strip()] if text else None
+
+    try:
+        result = DatasetAuditor().adversarial_validation(
+            data,
+            reference,
+            columns=_split(args.columns),
+            exclude=_split(args.exclude),
+            folds=args.folds,
+            l2=args.l2,
+            max_levels=args.max_levels,
+            interactions=args.interactions,
+            auc_threshold=args.threshold,
+            n_permutations=args.permutations,
+            top=args.top,
+            seed=args.seed,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        verdict = "SHIFT" if result["drifted"] else "no shift"
+        line = (
+            f"Domain-classifier AUC {_format_stat(result['auc'])} over {result['folds']} folds "
+            f"(threshold {result['auc_threshold']}): {verdict}"
+        )
+        if result["p_value"] is not None:
+            line += f", permutation p = {_format_stat(result['p_value'])} ({result['n_permutations']} permutations)"
+        print(line)
+        table = pd.DataFrame(
+            [
+                {
+                    "column": r["column"],
+                    "solo_auc": _format_stat(r["solo_auc"]),
+                    "importance": _format_stat(r["importance"]),
+                }
+                for r in result["columns"]
+            ]
+        )
+        _render_table(table, "table")
+        if result["ignored_columns"]:
+            print("Ignored (constant or empty): " + ", ".join(result["ignored_columns"]))
+    if args.fail_on_shift and result["drifted"]:
+        return 1
+    return 0
 
 
 def _cmd_associate(args: argparse.Namespace) -> int:
@@ -3078,6 +3169,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_refs(args)
     elif args.command == "distance":
         return _cmd_distance(args)
+    elif args.command == "adversarial":
+        return _cmd_adversarial(args)
     elif args.command == "associate":
         return _cmd_associate(args)
     elif args.command == "fd":

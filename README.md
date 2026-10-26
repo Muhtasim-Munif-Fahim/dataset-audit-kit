@@ -572,3 +572,43 @@ DatasetAuditor.wasserstein_distance([0, 1, 2], [1, 2, 3])  # 1.0
 dataset-audit-kit distance current.csv --reference reference.csv
 dataset-audit-kit distance current.csv --reference reference.csv --json --fail-on-drift --threshold 0.15
 ```
+
+## Adversarial validation
+
+Per-column drift tests look at one marginal at a time. Adversarial validation
+asks a joint question: can a classifier tell current rows from reference rows?
+`DatasetAuditor.adversarial_validation(current, reference)` trains an
+L2-penalised logistic regression (pure numpy, Newton-Raphson) that predicts
+which dataset each pooled row came from, and reports its stratified
+out-of-fold ROC AUC. An AUC near `0.5` means the two datasets are
+exchangeable. An AUC near `1.0` means they are trivially separable.
+
+Numeric columns are standardised (median-imputed, plus a missing indicator).
+Categorical columns are one-hot encoded (top `max_levels` levels plus
+"other"), and datetimes become numbers. A linear model only sees location
+shifts, so pass `interactions=True` to add squares and pairwise products of
+numeric columns. That also catches changes in spread and correlation.
+
+| Field | Meaning |
+| --- | --- |
+| `auc` | out-of-fold domain-classifier AUC |
+| `drifted` | `auc >= auc_threshold` (default `0.6`) |
+| `p_value` | permutation p-value when `n_permutations > 0` |
+| `columns` | per column: `solo_auc` (that column alone) and `importance` (absolute standardised coefficients), sorted by `solo_auc` |
+| `reference_most_like_current` | reference rows with the highest P(current), useful for a test-like validation split |
+
+A column with `solo_auc` near `1` (a row id, a timestamp) leaks the split on
+its own. Leave it out with `exclude=[...]` / `--exclude`.
+
+```python
+result = DatasetAuditor().adversarial_validation(
+    test_df, train_df, exclude=["id"], interactions=True, n_permutations=100
+)
+result["auc"], result["columns"][0]
+DatasetAuditor.rank_auc([0, 0, 1, 1], [0.1, 0.4, 0.35, 0.8])  # 0.75
+```
+
+```bash
+dataset-audit-kit adversarial test.csv --reference train.csv --exclude id
+dataset-audit-kit adversarial test.csv --reference train.csv --interactions --permutations 200 --json --fail-on-shift
+```
