@@ -89,6 +89,13 @@ DEFAULT_ADVERSARIAL_AUC_THRESHOLD = 0.6
 #: Most frequent levels one-hot encoded per categorical column in
 #: adversarial validation; the rest share an "other" indicator.
 DEFAULT_ADVERSARIAL_MAX_LEVELS = 20
+#: Jaccard similarity (over row tokens) at or above which two rows are near-duplicates.
+DEFAULT_NEAR_DUPLICATE_THRESHOLD = 0.8
+#: MinHash permutations used by the near-duplicate LSH index.
+DEFAULT_NEAR_DUPLICATE_NUM_PERM = 128
+#: Mersenne prime 2**31 - 1 for the universal hash family used by MinHash.
+#: With ``a, b, x < p`` the product ``a * x`` fits in an unsigned 64-bit integer.
+_MINHASH_PRIME = (1 << 31) - 1
 LABEL_ISSUE_METHODS = ("confident_joint", "prune_by_noise_rate", "prune_by_class", "both")
 BENFORD_EXPECTED = tuple(
     math.log10(1.0 + 1.0 / d) for d in range(1, 10)
@@ -8179,4 +8186,294 @@ class DatasetAuditor:
             "columns": per_column,
             "ignored_columns": ignored,
             "reference_most_like_current": most_like,
+        }
+
+    # ------------------------------------------------------------------
+    # Near-duplicate rows (MinHash + LSH)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def lsh_parameters(
+        threshold: float, num_perm: int, false_negative_weight: float = 0.5
+    ) -> tuple[int, int]:
+        """Choose ``(bands, rows_per_band)`` for a MinHash LSH index.
+
+        A pair with Jaccard ``s`` becomes a candidate with probability
+        ``1 - (1 - s**r)**b``. Following the usual recipe (as in
+        ``datasketch``), the pair ``b * r <= num_perm`` that minimises the
+        integrated false-positive area below ``threshold`` plus the
+        false-negative area above it is returned.  ``false_negative_weight``
+        (in ``[0, 1]``) weights the false-negative area and ``1 - weight`` the
+        false-positive area; candidates are later verified with exact Jaccard,
+        so :meth:`near_duplicates_report` favours recall (weight 0.9).
+        """
+        if not 0.0 <= float(false_negative_weight) <= 1.0:
+            raise ValueError("false_negative_weight must lie in [0, 1]")
+        w = float(false_negative_weight)
+        if not 0.0 < float(threshold) < 1.0:
+            raise ValueError("threshold must lie strictly between 0 and 1")
+        if not isinstance(num_perm, int) or isinstance(num_perm, bool) or num_perm < 2:
+            raise ValueError("num_perm must be an integer >= 2")
+
+        def area(f, lo, hi, n=200):
+            xs = np.linspace(lo, hi, n + 1)
+            ys = f(xs)
+            return float(np.sum((ys[1:] + ys[:-1]) * 0.5 * np.diff(xs)))
+
+        best: tuple[float, int, int] | None = None
+        for b in range(1, num_perm + 1):
+            for r in range(1, num_perm // b + 1):
+                fp = area(lambda x: 1.0 - (1.0 - x ** r) ** b, 0.0, threshold)
+                fn = area(lambda x: (1.0 - x ** r) ** b, threshold, 1.0)
+                err = (1.0 - w) * fp + w * fn
+                if best is None or err < best[0] - 1e-15:
+                    best = (err, b, r)
+        assert best is not None
+        return best[1], best[2]
+
+    @staticmethod
+    def _row_token_sets(
+        frame: pd.DataFrame,
+        columns: list,
+        text_columns: list,
+        shingle_size: int,
+    ) -> list[frozenset]:
+        """Token set per row: ``col=value`` fields plus character shingles of text columns."""
+        text = set(text_columns)
+        per_col: list[list[set]] = []
+        for col in columns:
+            series = frame[col]
+            missing = series.isna().to_numpy()
+            values = series.astype(str).str.strip().str.lower().to_numpy()
+            name = str(col)
+            out: list[set] = []
+            for v, miss in zip(values, missing):
+                if miss:
+                    out.append(set())
+                elif col in text:
+                    norm = " ".join(v.split())
+                    if len(norm) <= shingle_size:
+                        out.append({f"{name}~{norm}"})
+                    else:
+                        out.append({f"{name}~{norm[i:i + shingle_size]}" for i in range(len(norm) - shingle_size + 1)})
+                else:
+                    out.append({f"{name}={v}"})
+            per_col.append(out)
+        return [frozenset().union(*(c[i] for c in per_col)) for i in range(len(frame))]
+
+    @staticmethod
+    def minhash_signatures(token_sets: "Sequence[Iterable[str]]", num_perm: int = DEFAULT_NEAR_DUPLICATE_NUM_PERM,
+                           seed: int = 0) -> np.ndarray:
+        """MinHash signatures, shape ``(n_sets, num_perm)`` (``uint64``).
+
+        Tokens are hashed with ``blake2b`` (stable across processes), reduced
+        modulo the Mersenne prime ``p = 2**31 - 1``, and permuted by
+        ``h_k(x) = (a_k x + b_k) mod p`` with ``1 <= a_k < p`` and ``0 <= b_k < p``. For two
+        sets, the share of equal signature entries is an unbiased estimate of
+        their Jaccard similarity. Empty sets get the all-max signature.
+        """
+        import hashlib
+
+        if not isinstance(num_perm, int) or isinstance(num_perm, bool) or num_perm < 1:
+            raise ValueError("num_perm must be a positive integer")
+        rng = np.random.default_rng(seed)
+        a = rng.integers(1, _MINHASH_PRIME, size=num_perm, dtype=np.uint64)
+        b = rng.integers(0, _MINHASH_PRIME, size=num_perm, dtype=np.uint64)
+        prime = np.uint64(_MINHASH_PRIME)
+        sets = list(token_sets)
+        sig = np.full((len(sets), num_perm), np.iinfo(np.uint64).max, dtype=np.uint64)
+        cache: dict[str, int] = {}
+        for i, tokens in enumerate(sets):
+            hv = []
+            for t in tokens:
+                h = cache.get(t)
+                if h is None:
+                    h = int.from_bytes(hashlib.blake2b(t.encode("utf-8"), digest_size=8).digest(), "little") % _MINHASH_PRIME
+                    cache[t] = h
+                hv.append(h)
+            if not hv:
+                continue
+            x = np.asarray(hv, dtype=np.uint64)
+            sig[i] = ((x[:, None] * a[None, :] + b[None, :]) % prime).min(axis=0)
+        return sig
+
+    def near_duplicates_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: "Sequence[str] | None" = None,
+        text_columns: "Sequence[str] | None" = None,
+        threshold: float = DEFAULT_NEAR_DUPLICATE_THRESHOLD,
+        num_perm: int = DEFAULT_NEAR_DUPLICATE_NUM_PERM,
+        shingle_size: int = 4,
+        method: str = "lsh",
+        seed: int = 0,
+        top: int = 20,
+    ) -> dict[str, object]:
+        """Find near-duplicate rows by Jaccard similarity of their tokens.
+
+        ``row_duplicates_report`` only catches rows that are identical in every
+        column. Records that differ by a typo, a reformatted field or one
+        changed value slip through, inflate the data and leak between
+        train/test splits. Here every row becomes a token set:
+        ``column=value`` for ordinary columns, and character
+        ``shingle_size``-grams for free-text columns (``text_columns``,
+        default: object columns whose median length is at least 20 and that
+        contain spaces). Two rows are near-duplicates when the Jaccard
+        similarity of their sets is at least ``threshold``.
+
+        ``method="lsh"`` (default) builds MinHash signatures and a banded LSH
+        index (:meth:`lsh_parameters` picks the band layout) to propose
+        candidate pairs in roughly linear time. Every candidate is then
+        verified with the **exact** Jaccard similarity, so reported pairs
+        have no false positives. ``method="exact"`` compares all pairs
+        instead (quadratic, for small tables or validation). Rows with
+        identical token sets are collapsed before indexing, so large
+        exact-duplicate groups do not blow up the candidate count. Verified
+        pairs are merged into clusters with union-find.
+
+        Returns counts, the LSH layout, the ``top`` most similar ``pairs``
+        (with the columns that differ) and the ``top`` largest ``clusters``.
+        """
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0.0 < float(threshold) < 1.0:
+            raise ValueError("threshold must lie strictly between 0 and 1")
+        if method not in ("lsh", "exact"):
+            raise ValueError("method must be 'lsh' or 'exact'")
+        if not isinstance(shingle_size, int) or isinstance(shingle_size, bool) or shingle_size < 1:
+            raise ValueError("shingle_size must be a positive integer")
+        if not isinstance(top, int) or isinstance(top, bool) or top < 0:
+            raise ValueError("top must be a non-negative integer")
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        cols = list(frame.columns) if columns is None else list(columns)
+        if not cols:
+            raise ValueError("at least one column is required")
+        unknown = [c for c in cols if c not in frame.columns]
+        if unknown:
+            raise ValueError(f"unknown columns: {unknown}")
+        if text_columns is None:
+            texts = []
+            for c in cols:
+                ser = frame[c]
+                if ser.dtype == object or pd.api.types.is_string_dtype(ser.dtype):
+                    strs = ser.dropna().astype(str)
+                    if len(strs) and strs.str.len().median() >= 20 and strs.str.contains(" ").mean() >= 0.5:
+                        texts.append(c)
+        else:
+            texts = list(text_columns)
+            bad = [c for c in texts if c not in cols]
+            if bad:
+                raise ValueError(f"text_columns must be among the audited columns: {bad}")
+        n = len(frame)
+        sets = self._row_token_sets(frame, cols, texts, shingle_size)
+
+        # collapse identical token sets
+        rep_of: dict[frozenset, int] = {}
+        groups: list[list[int]] = []
+        for i, s_ in enumerate(sets):
+            g = rep_of.get(s_)
+            if g is None:
+                rep_of[s_] = len(groups)
+                groups.append([i])
+            else:
+                groups[g].append(i)
+        uniq = [sets[g[0]] for g in groups]
+        m = len(uniq)
+
+        candidates: set[tuple[int, int]] = set()
+        bands = rows = None
+        if method == "exact":
+            candidates = {(i, j) for i in range(m) for j in range(i + 1, m)}
+        else:
+            bands, rows = self.lsh_parameters(float(threshold), int(num_perm), false_negative_weight=0.9)
+            sig = self.minhash_signatures(uniq, num_perm, seed)
+            for band in range(bands):
+                buckets: dict[bytes, list[int]] = {}
+                block = np.ascontiguousarray(sig[:, band * rows:(band + 1) * rows])
+                for i in range(m):
+                    if not uniq[i]:
+                        continue
+                    buckets.setdefault(block[i].tobytes(), []).append(i)
+                for members in buckets.values():
+                    if len(members) > 1:
+                        for x in range(len(members)):
+                            for y in range(x + 1, len(members)):
+                                candidates.add((members[x], members[y]))
+
+        parent = list(range(m))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        verified: list[tuple[int, int, float]] = []
+        for i, j in candidates:
+            a_, b_ = uniq[i], uniq[j]
+            if not a_ or not b_:
+                continue
+            inter = len(a_ & b_)
+            jac = inter / (len(a_) + len(b_) - inter)
+            if jac >= threshold:
+                verified.append((i, j, jac))
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+        index = frame.index.to_numpy()
+
+        def label(pos: int) -> object:
+            v = index[pos]
+            return v.item() if hasattr(v, "item") else v
+
+        def differing(p: int, q: int) -> list[str]:
+            out = []
+            for c in cols:
+                x, y = frame[c].iloc[p], frame[c].iloc[q]
+                if pd.isna(x) and pd.isna(y):
+                    continue
+                if pd.isna(x) or pd.isna(y) or str(x).strip().lower() != str(y).strip().lower():
+                    out.append(str(c))
+            return out
+
+        verified.sort(key=lambda t: (-t[2], groups[t[0]][0], groups[t[1]][0]))
+        pairs = [
+            {
+                "left": label(groups[i][0]),
+                "right": label(groups[j][0]),
+                "jaccard": round(float(jac), 6),
+                "differing_columns": differing(groups[i][0], groups[j][0]),
+            }
+            for i, j, jac in verified[:top]
+        ]
+        clusters_map: dict[int, list[int]] = {}
+        for i, j, _ in verified:
+            for u in (i, j):
+                clusters_map.setdefault(find(u), [])
+        for u in range(m):
+            r = find(u)
+            if r in clusters_map:
+                clusters_map[r].append(u)
+        clusters = []
+        for members in clusters_map.values():
+            rows_ = sorted(p for u in members for p in groups[u])
+            clusters.append({"indices": [label(p) for p in rows_], "size": len(rows_), "n_distinct": len(members)})
+        clusters.sort(key=lambda c: (-int(c["size"]), str(c["indices"][0])))
+        n_in = int(sum(c["size"] for c in clusters))
+        return {
+            "n_rows": int(n),
+            "n_distinct_rows": int(m),
+            "columns": [str(c) for c in cols],
+            "text_columns": [str(c) for c in texts],
+            "threshold": float(threshold),
+            "method": method,
+            "num_perm": int(num_perm) if method == "lsh" else None,
+            "bands": bands,
+            "rows_per_band": rows,
+            "n_candidate_pairs": int(len(candidates)),
+            "n_near_duplicate_pairs": int(len(verified)),
+            "n_clusters": int(len(clusters)),
+            "n_rows_in_clusters": n_in,
+            "near_duplicate_share": round(n_in / n, 6) if n else 0.0,
+            "pairs": pairs,
+            "clusters": clusters[:top],
         }
