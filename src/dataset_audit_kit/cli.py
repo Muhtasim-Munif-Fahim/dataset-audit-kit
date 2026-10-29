@@ -20,6 +20,8 @@ from .core import (
     DEFAULT_FD_MAX_G3,
     DEFAULT_LABEL_LEAKAGE_THRESHOLD,
     DEFAULT_MCAR_ALPHA,
+    DEFAULT_NEAR_DUPLICATE_NUM_PERM,
+    DEFAULT_NEAR_DUPLICATE_THRESHOLD,
     DEFAULT_PRIVACY_K,
     DEFAULT_PRIVACY_L,
     DEFAULT_PRIVACY_T,
@@ -866,6 +868,24 @@ def build_parser() -> argparse.ArgumentParser:
     privacy_parser.add_argument("--top", type=int, default=10, help="Riskiest equivalence classes to list (default: 10)")
     privacy_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     privacy_parser.add_argument("--fail-on-violation", action="store_true", help="Exit 1 if k, l or t is not satisfied")
+
+    nd_parser = subparsers.add_parser(
+        "near-dups",
+        help="Near-duplicate rows by Jaccard similarity (MinHash LSH with exact verification)",
+    )
+    nd_parser.add_argument("data", help="Path to the dataset")
+    nd_parser.add_argument("--columns", default=None, help="Comma-separated columns to compare (default: all)")
+    nd_parser.add_argument("--text-columns", default=None, help="Comma-separated free-text columns to shingle (default: auto)")
+    nd_parser.add_argument("--threshold", type=float, default=DEFAULT_NEAR_DUPLICATE_THRESHOLD,
+                           help=f"Jaccard similarity threshold (default: {DEFAULT_NEAR_DUPLICATE_THRESHOLD})")
+    nd_parser.add_argument("--num-perm", type=int, default=DEFAULT_NEAR_DUPLICATE_NUM_PERM,
+                           help=f"MinHash permutations (default: {DEFAULT_NEAR_DUPLICATE_NUM_PERM})")
+    nd_parser.add_argument("--shingle-size", type=int, default=4, help="Character shingle size for text columns (default: 4)")
+    nd_parser.add_argument("--exact", action="store_true", help="Compare all pairs instead of using LSH")
+    nd_parser.add_argument("--seed", type=int, default=0, help="MinHash seed (default: 0)")
+    nd_parser.add_argument("--top", type=int, default=20, help="Pairs / clusters to list (default: 20)")
+    nd_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    nd_parser.add_argument("--fail-on-duplicates", action="store_true", help="Exit 1 if any near-duplicate pair is found")
 
     diff_parser = subparsers.add_parser("diff", help="Compare two audit reports saved as JSON")
     diff_parser.add_argument("baseline", help="Path to the earlier report (--save-json output)")
@@ -2153,6 +2173,61 @@ def _cmd_privacy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_near_dups(args: argparse.Namespace) -> int:
+    """Handle the near-dups subcommand (MinHash LSH near-duplicate rows)."""
+    import json
+
+    data = _load(args)
+    split = lambda v: [c.strip() for c in v.split(",") if c.strip()] if v else None  # noqa: E731
+    try:
+        result = DatasetAuditor().near_duplicates_report(
+            data,
+            columns=split(args.columns),
+            text_columns=split(args.text_columns),
+            threshold=args.threshold,
+            num_perm=args.num_perm,
+            shingle_size=args.shingle_size,
+            method="exact" if args.exact else "lsh",
+            seed=args.seed,
+            top=args.top,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        layout = (
+            f"LSH {result['bands']} bands x {result['rows_per_band']} rows"
+            if result["method"] == "lsh" else "exact all-pairs"
+        )
+        print(
+            f"{result['n_rows']} row(s), {result['n_distinct_rows']} distinct; Jaccard >= {result['threshold']} "
+            f"({layout}); text columns: {', '.join(result['text_columns']) or 'none'}"
+        )
+        print(
+            f"{result['n_near_duplicate_pairs']} near-duplicate pair(s) from {result['n_candidate_pairs']} candidate(s); "
+            f"{result['n_clusters']} cluster(s) covering {result['n_rows_in_clusters']} row(s) "
+            f"({result['near_duplicate_share']:.2%})"
+        )
+        if result["pairs"]:
+            table = pd.DataFrame(
+                [
+                    {
+                        "left": p["left"],
+                        "right": p["right"],
+                        "jaccard": p["jaccard"],
+                        "differs_in": ", ".join(p["differing_columns"]) or "-",
+                    }
+                    for p in result["pairs"]
+                ]
+            )
+            _render_table(table, "table")
+    if args.fail_on_duplicates and result["n_near_duplicate_pairs"] > 0:
+        return 1
+    return 0
+
+
 def _cmd_refs(args: argparse.Namespace) -> int:
     """Handle the refs subcommand."""
     child = _load(args)
@@ -3181,5 +3256,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_label_issues(args)
     elif args.command == "privacy":
         return _cmd_privacy(args)
+    elif args.command == "near-dups":
+        return _cmd_near_dups(args)
     else:
         parser.error("unsupported command")

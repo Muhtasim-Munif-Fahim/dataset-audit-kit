@@ -39,6 +39,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
 - **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
 - **Privacy / re-identification audit**: k-anonymity, distinct and entropy l-diversity, and t-closeness (Earth Mover's Distance) over quasi-identifiers via the `privacy` CLI, with prosecutor re-identification risk and the riskiest equivalence classes.
+- **Near-duplicate rows**: MinHash + LSH banding (Broder 1997; Indyk & Motwani 1998) via the `near-dups` CLI finds rows that are almost but not exactly identical (one edited field, a typo in a free-text column), verified with exact Jaccard and grouped into clusters with the columns that differ.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -61,6 +62,26 @@ dataset-audit-kit privacy data.csv --qi age,zip --sensitive salary,diagnosis --j
 ```python
 res = DatasetAuditor().privacy_risk_report(df, ["age", "zip"], sensitive="diagnosis", k=5)
 d = DatasetAuditor.t_closeness_distance(class_counts, overall_counts, ordered=True)
+```
+
+### Near-duplicate rows (`near-dups`)
+
+`row_duplicates_report` only catches exact copies. `near-dups` turns every row into a token set (`column=value` for each field plus character shingles for free-text columns), so two rows that differ in one field or by a typo have a high **Jaccard similarity**.
+
+- **MinHash** signatures (`--num-perm` universal hashes mod the Mersenne prime 2^31 - 1) estimate Jaccard without comparing token sets.
+- **LSH banding** splits each signature into `b` bands of `r` rows. A pair becomes a candidate when any band matches, which happens with probability `1 - (1 - s^r)^b`. `b, r` are chosen by minimising the false-positive/false-negative area around `--threshold`, weighted towards recall.
+- Candidates are **verified with exact Jaccard**, so there are no false positives. `--exact` compares all pairs instead, for small tables or as a check.
+- Exact copies are collapsed first and appear inside clusters (`size` vs `n_distinct`). Text columns are auto-detected (long, space-containing strings) or set with `--text-columns`.
+
+```bash
+dataset-audit-kit near-dups customers.csv --threshold 0.8
+dataset-audit-kit near-dups reviews.csv --columns title,body --text-columns body --json --fail-on-duplicates
+```
+
+```python
+res = DatasetAuditor().near_duplicates_report(df, threshold=0.8, num_perm=128)
+res["pairs"][0]  # {'left': 17, 'right': 402, 'jaccard': 0.82, 'differing_columns': ['phone']}
+bands, rows = DatasetAuditor.lsh_parameters(0.8, 128)
 ```
 
 ### Functional dependencies (`fd`)
