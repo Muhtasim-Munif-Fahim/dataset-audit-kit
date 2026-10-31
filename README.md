@@ -121,6 +121,21 @@ res = DatasetAuditor().mcar_test_report(df, columns=["age", "income"])
 res["statistic"], res["df"], res["p_value"], res["mcar_rejected"], res["patterns"][:3]
 ```
 
+### Simpson's paradox (`simpson`)
+
+A two-level factor can look helpful overall yet harmful inside every subgroup when a third variable confounds the comparison. `simpson` compares the aggregate effect `mean(y | b) - mean(y | a)` with the stratum-adjusted effect (Mantel-Haenszel-weighted average of within-stratum differences, `w = n_a n_b / (n_a + n_b)`) for every factor/stratifier pair, and flags pairs whose signs disagree. The target may be numeric, boolean or any two-level column.
+
+```bash
+dataset-audit-kit simpson data.csv --target converted                  # auto-detect factors and strata
+dataset-audit-kit simpson data.csv --target converted --factors treatment --strata region,size --all
+dataset-audit-kit simpson data.csv --target converted --json --fail-on-reversal
+```
+
+```python
+res = DatasetAuditor().simpsons_paradox_report(df, "success", min_cell=10)
+res["n_reversals"], res["pairs"][0]
+```
+
 ### Mislabelled rows (`label-issues`)
 
 Label noise silently caps model quality. `label-issues` runs **confident learning** (Northcutt, Jiang & Chuang, 2021) on *out-of-sample* (cross-validated) class probabilities:
