@@ -7223,6 +7223,17 @@ class DatasetAuditor:
                 break
         return mu, sigma, iterations
 
+    def simpsons_paradox_report(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        **kwargs,
+    ) -> dict[str, object]:
+        """Flag Simpson's paradox reversals; see :func:`dataset_audit_kit.simpson.simpsons_paradox_report`."""
+        from .simpson import simpsons_paradox_report
+
+        return simpsons_paradox_report(data, target, **kwargs)
+
     def mcar_test_report(
         self,
         data: pd.DataFrame,

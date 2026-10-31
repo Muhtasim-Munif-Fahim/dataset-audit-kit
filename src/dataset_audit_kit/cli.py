@@ -818,6 +818,21 @@ def build_parser() -> argparse.ArgumentParser:
     fd_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     fd_parser.add_argument("--fail-on-dependency", action="store_true", help="Exit 1 if any dependency is found")
 
+    simpson_parser = subparsers.add_parser(
+        "simpson",
+        help="Detect Simpson's paradox: two-level factors whose effect on a target reverses within strata",
+    )
+    simpson_parser.add_argument("data", help="Path to the dataset")
+    simpson_parser.add_argument("--target", required=True, help="Numeric or binary target column")
+    simpson_parser.add_argument("--factors", default=None, help="Comma-separated two-level factor columns (default: auto)")
+    simpson_parser.add_argument("--strata", default=None, help="Comma-separated stratifier columns (default: auto)")
+    simpson_parser.add_argument("--min-cell", type=int, default=5, help="Minimum rows per factor level within a stratum (default: 5)")
+    simpson_parser.add_argument("--max-levels", type=int, default=20, help="Maximum levels for auto-selected strata (default: 20)")
+    simpson_parser.add_argument("--min-effect", type=float, default=0.0, help="Ignore reversals whose effects are this small (default: 0)")
+    simpson_parser.add_argument("--all", action="store_true", help="List every scanned pair, not just reversals")
+    simpson_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    simpson_parser.add_argument("--fail-on-reversal", action="store_true", help="Exit 1 if any reversal is found")
+
     mcar_parser = subparsers.add_parser(
         "mcar",
         help="Little's chi-square test that numeric values are missing completely at random",
@@ -2045,6 +2060,52 @@ def _cmd_fd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_simpson(args: argparse.Namespace) -> int:
+    """Handle the simpson subcommand (Simpson's paradox scan)."""
+    import json
+
+    data = _load(args)
+    try:
+        result = DatasetAuditor().simpsons_paradox_report(
+            data,
+            args.target,
+            factors=_parse_columns(args.factors),
+            strata=_parse_columns(args.strata),
+            min_cell=args.min_cell,
+            max_levels=args.max_levels,
+            min_effect=args.min_effect,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Simpson's paradox scan on target '{result['target']}': "
+            f"{result['n_pairs']} factor/stratum pair(s), {result['n_reversals']} reversal(s)"
+        )
+        rows = result["pairs"] if args.all else [r for r in result["pairs"] if r["reversal"]]
+        if rows:
+            table = pd.DataFrame(
+                [
+                    {
+                        "factor": f"{r['factor']} ({r['level_b']} vs {r['level_a']})",
+                        "stratum": r["stratum"],
+                        "aggregate": _format_stat(r["aggregate_effect"]),
+                        "adjusted": _format_stat(r["adjusted_effect"]),
+                        "reversed_strata": f"{r['reversed_strata']}/{r['n_strata']}",
+                        "reversal": "YES" if r["reversal"] else "no",
+                    }
+                    for r in rows
+                ]
+            )
+            _render_table(table, "table")
+    if args.fail_on_reversal and result["n_reversals"] > 0:
+        return 1
+    return 0
+
+
 def _cmd_mcar(args: argparse.Namespace) -> int:
     """Handle the mcar subcommand (Little's MCAR test)."""
     import json
@@ -3250,6 +3311,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_associate(args)
     elif args.command == "fd":
         return _cmd_fd(args)
+    elif args.command == "simpson":
+        return _cmd_simpson(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
     elif args.command == "label-issues":
