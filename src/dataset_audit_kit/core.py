@@ -7359,6 +7359,208 @@ class DatasetAuditor:
             "note": note,
         }
 
+    @staticmethod
+    def chi_square_quantile(prob: float, df: float) -> float:
+        """Inverse of the chi-square CDF (``P(X <= q) = prob``) by bisection on :meth:`chi_square_sf`."""
+        if not 0.0 < float(prob) < 1.0:
+            raise ValueError("prob must be strictly between 0 and 1")
+        if df <= 0:
+            raise ValueError("df must be positive")
+        lo, hi = 0.0, max(1.0, float(df))
+        while 1.0 - DatasetAuditor.chi_square_sf(hi, df) < prob:
+            hi *= 2.0
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if 1.0 - DatasetAuditor.chi_square_sf(mid, df) < prob:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo <= 1e-12 * max(1.0, hi):
+                break
+        return 0.5 * (lo + hi)
+
+    @staticmethod
+    def minimum_covariance_determinant(
+        X: np.ndarray,
+        *,
+        support_fraction: float | None = None,
+        n_starts: int = 50,
+        max_c_steps: int = 100,
+        random_state: int | None = 0,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """FastMCD (Rousseeuw & Van Driessen, 1999) robust location / scatter.
+
+        Finds the ``h``-subset of rows whose classical covariance has the
+        smallest determinant via random ``(p+1)``-point starts refined by
+        concentration steps (C-steps), then applies the usual consistency
+        factor and one reweighting step (rows with squared robust distance
+        ``<= chi2_{p, 0.975}`` get weight 1, followed by the matching
+        consistency correction). ``h`` defaults to
+        ``(n + p + 1) // 2`` (maximum breakdown). Returns
+        ``(location, covariance, raw_support_mask)``.
+        """
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array")
+        n, p = X.shape
+        if p < 1 or n < p + 2:
+            raise ValueError("need at least p + 2 complete rows for MCD")
+        if not np.isfinite(X).all():
+            raise ValueError("X must not contain NaN or infinite values")
+        if support_fraction is None:
+            h = (n + p + 1) // 2
+        else:
+            if not 0.5 <= float(support_fraction) <= 1.0:
+                raise ValueError("support_fraction must be in [0.5, 1]")
+            h = int(math.ceil(float(support_fraction) * n))
+        h = min(n, max(h, p + 1))
+        if not isinstance(n_starts, int) or isinstance(n_starts, bool) or n_starts <= 0:
+            raise ValueError("n_starts must be a positive integer")
+        rng = np.random.default_rng(random_state)
+
+        def _fit(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+            mu = X[rows].mean(axis=0)
+            cov = np.atleast_2d(np.cov(X[rows], rowvar=False, bias=True))
+            sign, logdet = np.linalg.slogdet(cov)
+            return mu, cov, (logdet if sign > 0 else -np.inf)
+
+        def _d2(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
+            diff = X - mu
+            sol = np.linalg.lstsq(cov, diff.T, rcond=None)[0]
+            return np.einsum("ij,ji->i", diff, sol)
+
+        best: tuple[float, np.ndarray] | None = None
+        for _ in range(n_starts):
+            rows = rng.choice(n, size=p + 1, replace=False)
+            mu, cov, _ = _fit(rows)
+            # Grow a singular start until its covariance is invertible.
+            while np.linalg.matrix_rank(cov) < p and rows.size < n:
+                extra = rng.choice(np.setdiff1d(np.arange(n), rows), size=1)
+                rows = np.concatenate([rows, extra])
+                mu, cov, _ = _fit(rows)
+            prev = np.inf
+            for _ in range(max_c_steps):
+                rows = np.argsort(_d2(mu, cov), kind="stable")[:h]
+                mu, cov, logdet = _fit(rows)
+                if logdet == -np.inf:  # exact fit: h points on a hyperplane
+                    break
+                if prev - logdet <= 1e-12:
+                    break
+                prev = logdet
+            if best is None or logdet < best[0]:
+                best = (logdet, np.sort(rows))
+        assert best is not None
+        support = np.zeros(n, dtype=bool)
+        support[best[1]] = True
+        mu, cov, _ = _fit(best[1])
+        if h < n:
+            q = DatasetAuditor.chi_square_quantile(h / n, p)
+            consistency = (h / n) / (1.0 - DatasetAuditor.chi_square_sf(q, p + 2))
+            cov = cov * consistency
+        cutoff = DatasetAuditor.chi_square_quantile(0.975, p)
+        keep = _d2(mu, cov) <= cutoff
+        if keep.sum() >= p + 1:
+            mu = X[keep].mean(axis=0)
+            cov = np.atleast_2d(np.cov(X[keep], rowvar=False, bias=False))
+            # Truncating at the 0.975 quantile shrinks the scatter; rescale for
+            # consistency at the normal model (as in robustbase::covMcd).
+            cov = cov * 0.975 / (1.0 - DatasetAuditor.chi_square_sf(cutoff, p + 2))
+        return mu, cov, support
+
+    def multivariate_outlier_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        alpha: float = 0.025,
+        support_fraction: float | None = None,
+        random_state: int | None = 0,
+        top: int = 20,
+    ) -> dict[str, object]:
+        """Flag rows that are outlying *jointly* using robust Mahalanobis distances.
+
+        Per-column z-score / IQR rules miss rows whose values are each
+        unremarkable but whose combination is implausible (e.g. height 150 cm
+        with weight 120 kg). This fits FastMCD location / scatter on the
+        complete numeric rows, so the outliers cannot mask themselves by
+        inflating the covariance, and flags rows whose squared robust distance
+        exceeds the ``chi2_{p, 1 - alpha}`` quantile. The classical
+        (non-robust) distance is reported alongside so masking is visible.
+
+        Returns a dict with ``columns``, ``n_rows`` (complete rows used),
+        ``n_dropped_rows`` (rows with missing values), ``threshold``,
+        ``n_outliers`` / ``outlier_share``, robust ``location``, the
+        ``outliers`` table (largest distance first, at most ``top`` entries,
+        each with the row ``index``, ``robust_distance``,
+        ``classical_distance``, ``p_value`` and the column ``values``) and
+        ``masked`` — outliers the classical distance would have missed.
+        """
+        if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0.0 < float(alpha) < 1.0:
+            raise ValueError("alpha must be a number between 0 and 1 (exclusive)")
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            candidates = [
+                c for c in frame.columns
+                if pd.api.types.is_numeric_dtype(frame[c]) and not pd.api.types.is_bool_dtype(frame[c])
+            ]
+        else:
+            candidates = list(columns)
+            unknown = [c for c in candidates if c not in frame.columns]
+            if unknown:
+                raise ValueError(f"unknown columns: {unknown}")
+            bad = [c for c in candidates if not pd.api.types.is_numeric_dtype(frame[c])]
+            if bad:
+                raise ValueError(f"multivariate outliers need numeric columns; not numeric: {bad}")
+        numeric = frame[candidates].apply(pd.to_numeric, errors="coerce").astype(float)
+        usable = [c for c in candidates if numeric[c].nunique(dropna=True) > 1]
+        if not usable:
+            raise ValueError("no numeric columns with at least two distinct values")
+        sub = numeric[usable].replace([np.inf, -np.inf], np.nan)
+        complete = sub.notna().all(axis=1)
+        sub = sub[complete]
+        X = sub.to_numpy(dtype=float)
+        n, p = X.shape
+        mu, cov, support = DatasetAuditor.minimum_covariance_determinant(
+            X, support_fraction=support_fraction, random_state=random_state
+        )
+        diff = X - mu
+        robust_d2 = np.einsum("ij,ji->i", diff, np.linalg.lstsq(cov, diff.T, rcond=None)[0])
+        cdiff = X - X.mean(axis=0)
+        ccov = np.atleast_2d(np.cov(X, rowvar=False))
+        classical_d2 = np.einsum("ij,ji->i", cdiff, np.linalg.lstsq(ccov, cdiff.T, rcond=None)[0])
+        threshold = DatasetAuditor.chi_square_quantile(1.0 - float(alpha), p)
+        flagged = np.flatnonzero(robust_d2 > threshold)
+        order = flagged[np.argsort(-robust_d2[flagged], kind="stable")]
+        index = list(sub.index)
+        outliers = []
+        masked = []
+        for i in order:
+            entry = {
+                "index": index[i].item() if hasattr(index[i], "item") else index[i],
+                "robust_distance": float(math.sqrt(max(robust_d2[i], 0.0))),
+                "classical_distance": float(math.sqrt(max(classical_d2[i], 0.0))),
+                "p_value": float(DatasetAuditor.chi_square_sf(robust_d2[i], p)),
+                "values": {str(c): float(X[i, j]) for j, c in enumerate(usable)},
+            }
+            outliers.append(entry)
+            if classical_d2[i] <= threshold:
+                masked.append(entry["index"])
+        return {
+            "columns": [str(c) for c in usable],
+            "n_rows": int(n),
+            "n_dropped_rows": int((~complete).sum()),
+            "alpha": float(alpha),
+            "threshold": float(math.sqrt(threshold)),
+            "support_size": int(support.sum()),
+            "n_outliers": int(flagged.size),
+            "outlier_share": float(flagged.size / n) if n else 0.0,
+            "location": {str(c): float(mu[j]) for j, c in enumerate(usable)},
+            "outliers": outliers[:top],
+            "masked": masked,
+        }
+
     def memory_optimization_report(
         data: pd.DataFrame,
         *,

@@ -849,6 +849,19 @@ def build_parser() -> argparse.ArgumentParser:
     mcar_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     mcar_parser.add_argument("--fail-on-reject", action="store_true", help="Exit 1 if MCAR is rejected")
 
+    mvo_parser = subparsers.add_parser(
+        "mv-outliers",
+        help="Flag jointly outlying rows via robust (MCD) Mahalanobis distance",
+    )
+    mvo_parser.add_argument("data", help="Path to the dataset")
+    mvo_parser.add_argument("--columns", default=None, help="Comma-separated numeric columns (default: every numeric column)")
+    mvo_parser.add_argument("--alpha", type=float, default=0.025, help="Tail probability for the chi-square cutoff (default: 0.025)")
+    mvo_parser.add_argument("--support-fraction", type=float, default=None, help="MCD subset fraction in [0.5, 1] (default: max breakdown)")
+    mvo_parser.add_argument("--seed", type=int, default=0, help="Random seed for FastMCD starts (default: 0)")
+    mvo_parser.add_argument("--top", type=int, default=10, help="Outlying rows to list (default: 10)")
+    mvo_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    mvo_parser.add_argument("--fail-on-outliers", action="store_true", help="Exit 1 if any row is flagged")
+
     li_parser = subparsers.add_parser(
         "label-issues",
         help="Confident-learning audit: rows whose label is likely wrong given out-of-sample predicted probabilities",
@@ -2106,6 +2119,54 @@ def _cmd_simpson(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mv_outliers(args: argparse.Namespace) -> int:
+    """Handle the mv-outliers subcommand (robust Mahalanobis / FastMCD)."""
+    import json
+
+    data = _load(args)
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        result = DatasetAuditor().multivariate_outlier_report(
+            data,
+            columns=columns,
+            alpha=args.alpha,
+            support_fraction=args.support_fraction,
+            random_state=args.seed,
+            top=args.top,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Robust Mahalanobis (FastMCD) on {len(result['columns'])} numeric column(s), "
+            f"{result['n_rows']} complete row(s) ({result['n_dropped_rows']} with missing values skipped)"
+        )
+        print(
+            f"cutoff distance = {result['threshold']:.4g} (chi2 {1 - result['alpha']:g} quantile); "
+            f"{result['n_outliers']} outlier(s) ({result['outlier_share']:.1%}), "
+            f"{len(result['masked'])} masked under the classical distance"
+        )
+        if result["outliers"]:
+            table = pd.DataFrame(
+                [
+                    {
+                        "row": r["index"],
+                        "robust_dist": f"{r['robust_distance']:.3f}",
+                        "classical_dist": f"{r['classical_distance']:.3f}",
+                        "p_value": f"{r['p_value']:.3g}",
+                    }
+                    for r in result["outliers"]
+                ]
+            )
+            _render_table(table, "table")
+    if args.fail_on_outliers and result["n_outliers"]:
+        return 1
+    return 0
+
+
 def _cmd_mcar(args: argparse.Namespace) -> int:
     """Handle the mcar subcommand (Little's MCAR test)."""
     import json
@@ -3315,6 +3376,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_simpson(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
+    elif args.command == "mv-outliers":
+        return _cmd_mv_outliers(args)
     elif args.command == "label-issues":
         return _cmd_label_issues(args)
     elif args.command == "privacy":

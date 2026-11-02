@@ -37,6 +37,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
 - **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
 - **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
+- **Robust multivariate outliers**: FastMCD (minimum covariance determinant) location / scatter and robust Mahalanobis distances with a chi-square cutoff, via the `mv-outliers` CLI — catches rows whose *combination* of values is implausible even when every column looks normal, and lists outliers the classical distance would mask.
 - **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
 - **Privacy / re-identification audit**: k-anonymity, distinct and entropy l-diversity, and t-closeness (Earth Mover's Distance) over quasi-identifiers via the `privacy` CLI, with prosecutor re-identification risk and the riskiest equivalence classes.
 - **Near-duplicate rows**: MinHash + LSH banding (Broder 1997; Indyk & Motwani 1998) via the `near-dups` CLI finds rows that are almost but not exactly identical (one edited field, a typo in a free-text column), verified with exact Jaccard and grouped into clusters with the columns that differ.
@@ -119,6 +120,21 @@ The pattern table lists each missingness pattern's row count and its contributio
 ```python
 res = DatasetAuditor().mcar_test_report(df, columns=["age", "income"])
 res["statistic"], res["df"], res["p_value"], res["mcar_rejected"], res["patterns"][:3]
+```
+
+### Jointly outlying rows (`mv-outliers`)
+
+Per-column rules miss rows whose values are each plausible but whose combination is not. `mv-outliers` fits the **minimum covariance determinant** (FastMCD: random starts refined by concentration steps, consistency factor, one reweighting step) on the complete numeric rows and flags rows whose squared robust Mahalanobis distance exceeds the `chi2_{p, 1-alpha}` quantile. Because the outliers are excluded from the fit they cannot inflate the covariance and hide themselves; `masked` lists flagged rows the classical (mean / sample covariance) distance would have missed.
+
+```bash
+dataset-audit-kit mv-outliers data.csv                          # all numeric columns
+dataset-audit-kit mv-outliers data.csv --columns height,weight --alpha 0.01
+dataset-audit-kit mv-outliers data.csv --json --fail-on-outliers
+```
+
+```python
+res = DatasetAuditor().multivariate_outlier_report(df, columns=["height", "weight"])
+res["n_outliers"], res["threshold"], res["outliers"][:3], res["masked"]
 ```
 
 ### Simpson's paradox (`simpson`)
