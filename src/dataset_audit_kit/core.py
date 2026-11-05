@@ -3829,6 +3829,116 @@ class DatasetAuditor:
         )
         return rows[:top]
 
+    def digit_heaping_report(
+        self,
+        data: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        top: int = 20,
+        min_samples: int = 50,
+        decimals: int | None = None,
+        min_range_units: int = 50,
+        alpha: float = 0.05,
+    ) -> list[dict[str, object]]:
+        """Detect terminal-digit preference ("heaping") in numeric columns.
+
+        Values recorded by people (ages, weights, blood pressure, hours,
+        self-reported income) pile up on round numbers: last digits 0 and 5
+        are over-represented. For a quantity measured at resolution
+        ``10**-decimals`` that spans many units, the last recorded digit
+        should be close to uniform over 0-9, so heaping signals rounding,
+        estimation or fabrication.
+
+        For each numeric column the recording resolution is inferred as the
+        fewest decimals (0-6) at which every finite value is an integer
+        multiple of ``10**-decimals`` (override with ``decimals``). The last
+        digit of ``round(|x| * 10**decimals)`` is tested for uniformity with a
+        Pearson chi-square test (9 degrees of freedom). The report also
+        gives a Whipple-style index ``share(0 or 5) / 0.2`` (1 means no
+        heaping, 5 means every value ends in 0 or 5) and the most
+        over-represented digit.
+
+        Columns with fewer than ``min_samples`` finite values, or whose
+        range covers fewer than ``min_range_units`` recording units (where
+        the last digit cannot be uniform), are skipped. Rows are sorted by
+        ascending p-value and the first ``top`` are returned.
+        """
+        if not isinstance(top, int) or isinstance(top, bool) or top <= 0:
+            raise ValueError("top must be a positive integer")
+        if not isinstance(min_samples, int) or isinstance(min_samples, bool) or min_samples < 10:
+            raise ValueError("min_samples must be an integer >= 10")
+        if decimals is not None and (
+            not isinstance(decimals, int) or isinstance(decimals, bool) or not 0 <= decimals <= 6
+        ):
+            raise ValueError("decimals must be an integer in [0, 6]")
+        if not isinstance(min_range_units, int) or isinstance(min_range_units, bool) or min_range_units < 1:
+            raise ValueError("min_range_units must be a positive integer")
+        if not 0.0 < float(alpha) < 1.0:
+            raise ValueError("alpha must be in (0, 1)")
+
+        frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if columns is None:
+            numeric_cols = [
+                c
+                for c in frame.columns
+                if pd.api.types.is_numeric_dtype(frame[c]) and not pd.api.types.is_bool_dtype(frame[c])
+            ]
+        else:
+            numeric_cols = list(columns)
+            missing = [c for c in numeric_cols if c not in frame.columns]
+            if missing:
+                raise ValueError(f"unknown columns: {missing}")
+
+        from scipy.stats import chi2 as _chi2
+
+        rows: list[dict[str, object]] = []
+        for column in numeric_cols:
+            values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size < min_samples:
+                continue
+            abs_vals = np.abs(values)
+            if decimals is None:
+                resolution = None
+                for d in range(7):
+                    scaled = abs_vals * 10.0**d
+                    if np.all(np.abs(scaled - np.round(scaled)) <= 1e-6 * np.maximum(1.0, scaled)):
+                        resolution = d
+                        break
+                if resolution is None:
+                    continue  # continuous / unrounded values: no terminal digit
+            else:
+                resolution = decimals
+            units = np.round(abs_vals * 10.0**resolution)
+            if float(values.max() - values.min()) * 10.0**resolution < min_range_units:
+                continue
+            digits = np.mod(units, 10).astype(int)
+            observed = np.bincount(digits, minlength=10).astype(float)
+            n = float(observed.sum())
+            expected = n / 10.0
+            chi = float(np.sum((observed - expected) ** 2 / expected))
+            pvalue = float(_chi2.sf(chi, 9))
+            shares = observed / n
+            whipple = float((shares[0] + shares[5]) / 0.2)
+            preferred = int(np.argmax(observed))
+            rows.append(
+                {
+                    "column": column,
+                    "n": int(n),
+                    "decimals": int(resolution),
+                    "chi_square": chi,
+                    "p_value": pvalue,
+                    "whipple_index": whipple,
+                    "preferred_digit": preferred,
+                    "preferred_share": float(shares[preferred]),
+                    "digit_shares": {str(d): float(shares[d]) for d in range(10)},
+                    "suspect": bool(pvalue < float(alpha)),
+                }
+            )
+
+        rows.sort(key=lambda r: (float(r["p_value"]), str(r["column"])))
+        return rows[:top]
+
     def distribution_distance_report(
         self,
         data: pd.DataFrame,

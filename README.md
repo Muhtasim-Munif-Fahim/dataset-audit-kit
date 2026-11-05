@@ -594,6 +594,25 @@ for row in report_rows:
         print(row["column"], row["p_value"], row["mean_abs_deviation"])
 ```
 
+## Digit heaping (terminal-digit preference) report
+
+Human-recorded numbers pile up on round values: ages ending in 0 or 5,
+weights rounded to the nearest 5 kg. `DatasetAuditor.digit_heaping_report(df)`
+infers each numeric column's recording resolution (fewest decimals at which
+every value is a whole number of units), then tests whether the last recorded
+digit is uniform over 0-9 with a chi-square test. It also reports a
+Whipple-style index (`share(0 or 5) / 0.2`; 1 = no heaping, 5 = everything
+ends in 0/5) and the most over-represented digit. Unrounded continuous
+columns and columns spanning fewer than `min_range_units` units are skipped.
+
+```python
+from dataset_audit_kit import DatasetAuditor
+
+for row in DatasetAuditor().digit_heaping_report(df):
+    if row["suspect"]:
+        print(row["column"], row["whipple_index"], row["preferred_digit"], row["p_value"])
+```
+
 ## Distribution distance report
 
 PSI and the KS test tell you whether a column moved. They do not tell you how
