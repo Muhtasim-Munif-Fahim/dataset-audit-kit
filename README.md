@@ -37,6 +37,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Categorical association** (Cramér's V): pairwise association for text / low-cardinality columns via the `associate` CLI — fills the gap Pearson redundancy leaves for non-numeric features.
 - **Functional dependencies** (g3 error): exact and approximate `A -> B` dependencies (`zip -> city`, relabelled copies) via the `fd` CLI — finds redundant / derived columns and the rows that break the mapping.
 - **Little's MCAR test**: chi-square test (EM-estimated mean / covariance, per-pattern contributions) of whether numeric values are missing completely at random, via the `mcar` CLI — tells you whether dropping or mean-imputing missing rows is safe.
+- **Multivariate drift (kernel MMD)**: two-sample maximum mean discrepancy test (Gretton et al. 2012) with a permutation p-value over all shared numeric columns jointly, plus per-column marginal tests, via the `mmd-drift` CLI — catches joint shifts (e.g. a correlation flip) that per-column PSI / KS / distance checks cannot see.
 - **Robust multivariate outliers**: FastMCD (minimum covariance determinant) location / scatter and robust Mahalanobis distances with a chi-square cutoff, via the `mv-outliers` CLI — catches rows whose *combination* of values is implausible even when every column looks normal, and lists outliers the classical distance would mask.
 - **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
 - **Privacy / re-identification audit**: k-anonymity, distinct and entropy l-diversity, and t-closeness (Earth Mover's Distance) over quasi-identifiers via the `privacy` CLI, with prosecutor re-identification risk and the riskiest equivalence classes.
@@ -120,6 +121,20 @@ The pattern table lists each missingness pattern's row count and its contributio
 ```python
 res = DatasetAuditor().mcar_test_report(df, columns=["age", "income"])
 res["statistic"], res["df"], res["p_value"], res["mcar_rejected"], res["patterns"][:3]
+```
+
+### Multivariate drift (`mmd-drift`)
+
+PSI, KS and the distance report test one column at a time, so a shift that only changes how columns move *together* passes unnoticed. `mmd-drift` standardizes the shared numeric columns with the reference mean / standard deviation, uses a Gaussian kernel with the median-heuristic bandwidth, and computes the unbiased `MMD^2_u` between reference and current rows. The p-value comes from label permutations with the `(b + 1) / (B + 1)` correction. Per-column marginal tests show whether a joint shift is explained by a single column.
+
+```bash
+dataset-audit-kit mmd-drift current.csv --reference train.csv
+dataset-audit-kit mmd-drift current.csv --reference train.csv --columns x,y --permutations 500 --fail-on-drift
+```
+
+```python
+res = DatasetAuditor().mmd_drift_report(current_df, train_df)
+res["mmd2"], res["p_value"], res["drift_detected"], res["per_column"][:3], res["note"]
 ```
 
 ### Jointly outlying rows (`mv-outliers`)

@@ -739,6 +739,21 @@ def build_parser() -> argparse.ArgumentParser:
     distance_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     distance_parser.add_argument("--fail-on-drift", action="store_true", help="Exit 1 if any column is flagged")
 
+    mmd_parser = subparsers.add_parser(
+        "mmd-drift",
+        help="Multivariate drift: kernel MMD two-sample permutation test against a reference dataset",
+    )
+    mmd_parser.add_argument("data", help="Path to the current dataset")
+    mmd_parser.add_argument("--reference", required=True, help="Path to the reference dataset")
+    mmd_parser.add_argument("--columns", default=None, help="Comma-separated numeric columns (default: every shared numeric column)")
+    mmd_parser.add_argument("--permutations", type=int, default=200, help="Label permutations for the p-value (default: 200)")
+    mmd_parser.add_argument("--alpha", type=float, default=0.05, help="Significance level (default: 0.05)")
+    mmd_parser.add_argument("--max-rows", type=int, default=1000, help="Rows sampled per dataset (default: 1000)")
+    mmd_parser.add_argument("--seed", type=int, default=0, help="Random seed (default: 0)")
+    mmd_parser.add_argument("--no-per-column", action="store_true", help="Skip the per-column marginal tests")
+    mmd_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    mmd_parser.add_argument("--fail-on-drift", action="store_true", help="Exit 1 if multivariate drift is detected")
+
     adv_parser = subparsers.add_parser(
         "adversarial",
         help="Adversarial validation: can a domain classifier tell current rows from reference rows?",
@@ -1866,6 +1881,66 @@ def _key_strings(series: "pd.Series") -> "pd.Series":
     if pd.api.types.is_float_dtype(values) and (values == values.round()).all():
         return values.astype("int64").astype(str)
     return values.astype(str)
+
+
+def _cmd_mmd_drift(args: argparse.Namespace) -> int:
+    """Handle the mmd-drift subcommand (kernel two-sample test)."""
+    import json
+
+    data = _load(args)
+    try:
+        reference = DatasetAuditor.load_dataframe(
+            args.reference,
+            encoding=getattr(args, "encoding", None),
+            delimiter=getattr(args, "delimiter", None),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Cannot read reference dataset '{args.reference}': {exc}", file=sys.stderr)
+        return 2
+    columns = [c.strip() for c in args.columns.split(",") if c.strip()] if args.columns else None
+    try:
+        result = DatasetAuditor().mmd_drift_report(
+            data,
+            reference,
+            columns=columns,
+            n_permutations=args.permutations,
+            alpha=args.alpha,
+            max_rows=args.max_rows,
+            random_state=args.seed,
+            per_column=not args.no_per_column,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Kernel MMD two-sample test on {len(result['columns'])} numeric column(s): "
+            f"{result['n_reference']} reference vs {result['n_current']} current row(s)"
+        )
+        print(
+            f"MMD^2_u = {result['mmd2']:.4g}, p = {result['p_value']:.4g} "
+            f"({result['n_permutations']} permutations, bandwidth {result['bandwidth']:.3g}) -> "
+            f"{'DRIFT' if result['drift_detected'] else 'no drift'} at alpha = {result['alpha']:g}"
+        )
+        if result["per_column"]:
+            table = pd.DataFrame(
+                [
+                    {
+                        "column": r["column"],
+                        "mmd2": f"{r['mmd2']:.4g}",
+                        "p_value": f"{r['p_value']:.4g}",
+                        "drift": "yes" if r["drift"] else "no",
+                    }
+                    for r in result["per_column"]
+                ]
+            )
+            _render_table(table, "table")
+        print(result["note"])
+    if args.fail_on_drift and result["drift_detected"]:
+        return 1
+    return 0
 
 
 def _cmd_distance(args: argparse.Namespace) -> int:
@@ -3376,6 +3451,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_simpson(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
+    elif args.command == "mmd-drift":
+        return _cmd_mmd_drift(args)
     elif args.command == "mv-outliers":
         return _cmd_mv_outliers(args)
     elif args.command == "label-issues":
