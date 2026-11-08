@@ -3939,6 +3939,143 @@ class DatasetAuditor:
         rows.sort(key=lambda r: (float(r["p_value"]), str(r["column"])))
         return rows[:top]
 
+    @staticmethod
+    def _mmd_unbiased_stats(K: np.ndarray, labels_list: list[np.ndarray]) -> list[float]:
+        """Unbiased MMD^2 for each boolean ``labels`` vector (True = reference) over Gram ``K``."""
+        diag = np.diag(K)
+        out = []
+        for lab in labels_list:
+            a = lab.astype(float)
+            b = 1.0 - a
+            n1, n2 = a.sum(), b.sum()
+            Ka = K @ a
+            Kb = K @ b
+            sxx = (a @ Ka - a @ diag) / (n1 * (n1 - 1.0))
+            syy = (b @ Kb - b @ diag) / (n2 * (n2 - 1.0))
+            sxy = (b @ Ka) / (n1 * n2)
+            out.append(float(sxx + syy - 2.0 * sxy))
+        return out
+
+    @staticmethod
+    def _rbf_median_gram(Z: np.ndarray) -> tuple[np.ndarray, float]:
+        sq = np.sum(Z * Z, axis=1)
+        d2 = np.maximum(sq[:, None] + sq[None, :] - 2.0 * Z @ Z.T, 0.0)
+        upper = d2[np.triu_indices(len(Z), k=1)]
+        upper = upper[upper > 0]
+        h2 = float(np.median(upper)) if upper.size else 1.0
+        return np.exp(-d2 / h2), math.sqrt(h2 / 2.0)
+
+    def mmd_drift_report(
+        self,
+        data: pd.DataFrame,
+        reference: pd.DataFrame,
+        *,
+        columns: Sequence[str] | None = None,
+        n_permutations: int = 200,
+        alpha: float = 0.05,
+        max_rows: int = 1000,
+        random_state: int | None = 0,
+        per_column: bool = True,
+    ) -> dict[str, object]:
+        """Multivariate drift test: kernel two-sample MMD with a permutation p-value.
+
+        Per-column drift tests (PSI, KS, distances) cannot see a shift that
+        only changes the *joint* distribution, e.g. a correlation flip that
+        leaves every marginal unchanged. This report runs the kernel
+        maximum mean discrepancy test (Gretton et al., JMLR 2012) on the
+        shared numeric columns: rows with missing values are dropped, each
+        side is subsampled to ``max_rows``, columns are standardized with the
+        reference mean / standard deviation, and a Gaussian kernel with the
+        median-heuristic bandwidth on the pooled sample is used. The statistic
+        is the unbiased ``MMD^2_u``; its p-value comes from ``n_permutations``
+        label permutations with the ``(b + 1) / (B + 1)`` correction.
+
+        With ``per_column=True`` the same test is run on each column alone so
+        you can tell whether the joint shift is explained by a marginal one.
+        """
+        if not isinstance(n_permutations, int) or isinstance(n_permutations, bool) or n_permutations < 1:
+            raise ValueError("n_permutations must be a positive integer")
+        if not 0.0 < float(alpha) < 1.0:
+            raise ValueError("alpha must be strictly between 0 and 1")
+        if not isinstance(max_rows, int) or isinstance(max_rows, bool) or max_rows < 5:
+            raise ValueError("max_rows must be an integer >= 5")
+        if columns is None:
+            cols = [
+                c for c in data.columns
+                if c in reference.columns
+                and pd.api.types.is_numeric_dtype(data[c])
+                and pd.api.types.is_numeric_dtype(reference[c])
+                and not pd.api.types.is_bool_dtype(data[c])
+            ]
+        else:
+            cols = list(columns)
+            for c in cols:
+                if c not in data.columns or c not in reference.columns:
+                    raise ValueError(f"column '{c}' is not in both datasets")
+                if not (pd.api.types.is_numeric_dtype(data[c]) and pd.api.types.is_numeric_dtype(reference[c])):
+                    raise ValueError(f"column '{c}' is not numeric")
+        if not cols:
+            raise ValueError("no shared numeric columns to compare")
+        cur = data[cols].astype(float)
+        ref = reference[cols].astype(float)
+        cur_ok = cur.dropna()
+        ref_ok = ref.dropna()
+        if len(cur_ok) < 5 or len(ref_ok) < 5:
+            raise ValueError("need at least 5 complete rows in each dataset")
+        rng = np.random.default_rng(random_state)
+        X = ref_ok.to_numpy()
+        Y = cur_ok.to_numpy()
+        if len(X) > max_rows:
+            X = X[rng.choice(len(X), size=max_rows, replace=False)]
+        if len(Y) > max_rows:
+            Y = Y[rng.choice(len(Y), size=max_rows, replace=False)]
+        mu = X.mean(axis=0)
+        sd = X.std(axis=0, ddof=1)
+        sd = np.where(sd > 0, sd, 1.0)
+        Z = (np.vstack([X, Y]) - mu) / sd
+        n1, n = len(X), len(X) + len(Y)
+        base = np.zeros(n, dtype=bool)
+        base[:n1] = True
+        perms = [rng.permutation(base) for _ in range(n_permutations)]
+
+        def _test(Zs: np.ndarray) -> tuple[float, float, float]:
+            K, bw = DatasetAuditor._rbf_median_gram(Zs)
+            stat = DatasetAuditor._mmd_unbiased_stats(K, [base])[0]
+            null = np.asarray(DatasetAuditor._mmd_unbiased_stats(K, perms))
+            p = (float(np.sum(null >= stat - 1e-12)) + 1.0) / (n_permutations + 1.0)
+            return stat, p, bw
+
+        stat, p_value, bandwidth = _test(Z)
+        column_rows: list[dict[str, object]] = []
+        if per_column:
+            for j, c in enumerate(cols):
+                s, p, _ = _test(Z[:, [j]])
+                column_rows.append({"column": c, "mmd2": s, "p_value": p, "drift": bool(p < alpha)})
+            column_rows.sort(key=lambda r: -float(r["mmd2"]))
+        drift = bool(p_value < alpha)
+        marginal = [r["column"] for r in column_rows if r["drift"]]
+        if not drift:
+            note = "No multivariate drift detected."
+        elif per_column and not marginal:
+            note = "Joint distribution shifted while no single column did: look at correlations / interactions."
+        else:
+            note = "Multivariate drift detected; marginally drifted columns: " + ", ".join(map(str, marginal)) if marginal else "Multivariate drift detected."
+        return {
+            "columns": cols,
+            "n_reference": int(n1),
+            "n_current": int(n - n1),
+            "n_dropped_reference": int(len(ref) - len(ref_ok)),
+            "n_dropped_current": int(len(cur) - len(cur_ok)),
+            "bandwidth": bandwidth,
+            "mmd2": stat,
+            "p_value": p_value,
+            "alpha": float(alpha),
+            "n_permutations": n_permutations,
+            "drift_detected": drift,
+            "per_column": column_rows,
+            "note": note,
+        }
+
     def distribution_distance_report(
         self,
         data: pd.DataFrame,
