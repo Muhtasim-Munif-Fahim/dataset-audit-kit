@@ -152,6 +152,21 @@ res = DatasetAuditor().multivariate_outlier_report(df, columns=["height", "weigh
 res["n_outliers"], res["threshold"], res["outliers"][:3], res["masked"]
 ```
 
+### Class imbalance (`imbalance`)
+
+`imbalance` profiles a classification target: per-class counts and shares, the imbalance ratio (max/min count) with a severity band, Pielou evenness (normalized entropy) and the normalized Gini-Simpson index, the effective number of samples per class `(1 - beta^n_c) / (1 - beta)` with the matching class-balanced loss weights (Cui et al., CVPR 2019) next to plain inverse-frequency weights, and flags for minority classes (share < 0.5/K) and classes too rare for stratified K-fold. With `--by` it breaks the class shares down per segment and runs a chi-square label-shift test (with Cramér's V).
+
+```bash
+dataset-audit-kit imbalance data.csv --target label
+dataset-audit-kit imbalance data.csv --target label --by site --json
+dataset-audit-kit imbalance data.csv --target label --fail-on-imbalance --ir-threshold 5
+```
+
+```python
+res = DatasetAuditor().class_imbalance_report(df, "label", beta=0.999)
+res["imbalance_ratio"], res["severity"], [c["class_balanced_weight"] for c in res["classes"]]
+```
+
 ### Simpson's paradox (`simpson`)
 
 A two-level factor can look helpful overall yet harmful inside every subgroup when a third variable confounds the comparison. `simpson` compares the aggregate effect `mean(y | b) - mean(y | a)` with the stratum-adjusted effect (Mantel-Haenszel-weighted average of within-stratum differences, `w = n_a n_b / (n_a + n_b)`) for every factor/stratifier pair, and flags pairs whose signs disagree. The target may be numeric, boolean or any two-level column.
