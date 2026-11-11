@@ -833,6 +833,19 @@ def build_parser() -> argparse.ArgumentParser:
     fd_parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of a table")
     fd_parser.add_argument("--fail-on-dependency", action="store_true", help="Exit 1 if any dependency is found")
 
+    imbalance_parser = subparsers.add_parser(
+        "imbalance",
+        help="Class imbalance report: imbalance ratio, evenness, effective numbers and class weights",
+    )
+    imbalance_parser.add_argument("data", help="Path to the dataset")
+    imbalance_parser.add_argument("--target", required=True, help="Classification target column")
+    imbalance_parser.add_argument("--by", default=None, help="Optional segment column for per-level class shares and a label-shift test")
+    imbalance_parser.add_argument("--beta", type=float, default=0.999, help="Effective-number beta in [0, 1) (default: 0.999)")
+    imbalance_parser.add_argument("--ir-threshold", type=float, default=3.0, help="Imbalance ratio above which the target is imbalanced (default: 3)")
+    imbalance_parser.add_argument("--min-count", type=int, default=10, help="Flag classes with fewer rows (default: 10)")
+    imbalance_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    imbalance_parser.add_argument("--fail-on-imbalance", action="store_true", help="Exit 1 if the target is imbalanced")
+
     simpson_parser = subparsers.add_parser(
         "simpson",
         help="Detect Simpson's paradox: two-level factors whose effect on a target reverses within strata",
@@ -2148,6 +2161,60 @@ def _cmd_fd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_imbalance(args: argparse.Namespace) -> int:
+    """Handle the imbalance subcommand (class imbalance report)."""
+    import json
+
+    data = _load(args)
+    try:
+        result = DatasetAuditor().class_imbalance_report(
+            data,
+            args.target,
+            by=args.by,
+            beta=args.beta,
+            ir_threshold=args.ir_threshold,
+            min_count=args.min_count,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Class imbalance for '{result['target']}': {result['n_classes']} class(es), "
+            f"{result['n_rows']} labelled row(s), {result['n_missing']} missing"
+        )
+        print(
+            f"Imbalance ratio {result['imbalance_ratio']:.2f} ({result['severity']}), "
+            f"evenness {result['evenness']:.3f}, Gini-Simpson {result['gini_simpson']:.3f}"
+        )
+        table = pd.DataFrame(
+            [
+                {
+                    "class": r["class"],
+                    "count": r["count"],
+                    "share": f"{r['share']:.2%}",
+                    "eff_n": f"{r['effective_number']:.1f}",
+                    "cb_weight": f"{r['class_balanced_weight']:.3f}",
+                    "inv_weight": f"{r['inverse_frequency_weight']:.3f}",
+                    "flags": ",".join(f for f, on in (("minority", r["minority"]), ("too_few", r["too_few"])) if on),
+                }
+                for r in result["classes"]
+            ]
+        )
+        _render_table(table, "table")
+        if "by" in result:
+            seg = result["by"]
+            print(
+                f"Label shift across '{seg['column']}': chi2={_format_stat(seg['chi_square'])} "
+                f"dof={seg['dof']} p={_format_stat(seg['p_value'])} Cramer's V={_format_stat(seg['cramers_v'])}"
+            )
+    if args.fail_on_imbalance and result["imbalanced"]:
+        return 1
+    return 0
+
+
 def _cmd_simpson(args: argparse.Namespace) -> int:
     """Handle the simpson subcommand (Simpson's paradox scan)."""
     import json
@@ -3449,6 +3516,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_fd(args)
     elif args.command == "simpson":
         return _cmd_simpson(args)
+    elif args.command == "imbalance":
+        return _cmd_imbalance(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
     elif args.command == "mmd-drift":

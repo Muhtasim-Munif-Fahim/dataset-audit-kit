@@ -3829,6 +3829,182 @@ class DatasetAuditor:
         )
         return rows[:top]
 
+    def class_imbalance_report(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        *,
+        by: str | None = None,
+        beta: float = 0.999,
+        ir_threshold: float = 3.0,
+        minority_ratio: float = 0.5,
+        min_count: int = 10,
+        max_classes: int = 1000,
+    ) -> dict[str, object]:
+        """Quantify label imbalance in a classification target.
+
+        Missing labels are dropped (and counted). For the ``K`` observed
+        classes with counts ``n_c`` and shares ``p_c`` the report gives:
+
+        * ``imbalance_ratio`` – ``max n_c / min n_c`` (``imbalanced`` when it
+          exceeds ``ir_threshold``) and a ``severity`` band: ``balanced``
+          (IR < 1.5), ``mild`` (< 3), ``moderate`` (< 10), ``severe`` (< 100)
+          or ``extreme``.
+        * ``evenness`` – Pielou's normalized Shannon entropy
+          ``-sum p log p / log K`` (1 = perfectly balanced) and the normalized
+          Gini–Simpson index ``(1 - sum p^2) / (1 - 1/K)``.
+        * ``effective_number`` – Cui et al. (2019) effective number of samples
+          ``(1 - beta^n_c) / (1 - beta)`` per class, with the resulting
+          *class-balanced* loss weights ``∝ 1 / E_c`` and the classic
+          inverse-frequency weights ``n / (K n_c)`` (scikit-learn's
+          ``"balanced"``). Class-balanced weights are normalized to sum to
+          ``K`` as in the paper; inverse-frequency weights give every class
+          the same total weight and average 1 over rows.
+        * ``minority_classes`` – classes whose share is below
+          ``minority_ratio / K``, and ``too_few`` – classes with fewer than
+          ``min_count`` rows (too rare for stratified K-fold or reliable
+          per-class metrics).
+
+        With ``by`` the class shares are also broken down per level of that
+        column (e.g. site, month), together with a chi-square test of
+        independence between ``target`` and ``by`` (label shift across
+        segments) and Cramér's V.
+        """
+        if target not in data.columns:
+            raise ValueError(f"unknown column: {target!r}")
+        if by is not None and by not in data.columns:
+            raise ValueError(f"unknown column: {by!r}")
+        if by is not None and by == target:
+            raise ValueError("by must differ from target")
+        if not 0.0 <= float(beta) < 1.0:
+            raise ValueError("beta must be in [0, 1)")
+        if float(ir_threshold) < 1.0:
+            raise ValueError("ir_threshold must be >= 1")
+        if not 0.0 < float(minority_ratio) <= 1.0:
+            raise ValueError("minority_ratio must be in (0, 1]")
+        if not isinstance(min_count, int) or isinstance(min_count, bool) or min_count < 1:
+            raise ValueError("min_count must be a positive integer")
+
+        labels = data[target]
+        n_missing = int(labels.isna().sum())
+        observed = labels.dropna()
+        n = int(observed.size)
+        if n == 0:
+            raise ValueError(f"column {target!r} has no non-missing labels")
+        counts_series = observed.value_counts(sort=False)
+        if len(counts_series) > max_classes:
+            raise ValueError(
+                f"column {target!r} has {len(counts_series)} classes (> max_classes={max_classes}); "
+                "it does not look like a classification target"
+            )
+        order = sorted(counts_series.index, key=lambda c: (-int(counts_series[c]), str(c)))
+        counts = np.array([int(counts_series[c]) for c in order], dtype=float)
+        k = len(order)
+        shares = counts / n
+
+        if k > 1:
+            entropy = float(-np.sum(shares * np.log(shares)))
+            evenness = entropy / math.log(k)
+            gini_simpson = float(1.0 - np.sum(shares**2)) / (1.0 - 1.0 / k)
+        else:
+            entropy, evenness, gini_simpson = 0.0, 1.0, 1.0
+        imbalance_ratio = float(counts.max() / counts.min())
+        if imbalance_ratio < 1.5:
+            severity = "balanced"
+        elif imbalance_ratio < 3.0:
+            severity = "mild"
+        elif imbalance_ratio < 10.0:
+            severity = "moderate"
+        elif imbalance_ratio < 100.0:
+            severity = "severe"
+        else:
+            severity = "extreme"
+
+        beta_f = float(beta)
+        if beta_f == 0.0:
+            effective = np.ones(k)
+        else:
+            effective = -np.expm1(counts * math.log(beta_f)) / (1.0 - beta_f)
+        cb = 1.0 / effective
+        cb = cb * k / cb.sum()
+        inv = n / (k * counts)
+
+        cut = float(minority_ratio) / k
+        classes = []
+        for i, c in enumerate(order):
+            classes.append(
+                {
+                    "class": c.item() if hasattr(c, "item") else c,
+                    "count": int(counts[i]),
+                    "share": float(shares[i]),
+                    "effective_number": float(effective[i]),
+                    "class_balanced_weight": float(cb[i]),
+                    "inverse_frequency_weight": float(inv[i]),
+                    "minority": bool(k > 1 and shares[i] < cut),
+                    "too_few": bool(counts[i] < min_count),
+                }
+            )
+        result: dict[str, object] = {
+            "target": target,
+            "n_rows": n,
+            "n_missing": n_missing,
+            "n_classes": k,
+            "majority_class": classes[0]["class"],
+            "minority_class": classes[-1]["class"],
+            "imbalance_ratio": imbalance_ratio,
+            "imbalanced": bool(imbalance_ratio > float(ir_threshold)),
+            "severity": severity,
+            "entropy": entropy,
+            "evenness": float(evenness),
+            "gini_simpson": float(gini_simpson),
+            "beta": beta_f,
+            "classes": classes,
+            "minority_classes": [r["class"] for r in classes if r["minority"]],
+            "too_few": [r["class"] for r in classes if r["too_few"]],
+        }
+
+        if by is not None:
+            frame = data.loc[labels.notna(), [target, by]].dropna()
+            table = pd.crosstab(frame[by], frame[target])
+            table = table.reindex(columns=[c for c in order if c in table.columns])
+            groups = []
+            for level, row in table.iterrows():
+                total = int(row.sum())
+                group_counts = row.to_numpy(dtype=float)
+                present = group_counts[group_counts > 0]
+                groups.append(
+                    {
+                        "level": level.item() if hasattr(level, "item") else level,
+                        "n_rows": total,
+                        "shares": {
+                            (c.item() if hasattr(c, "item") else c): float(v / total) for c, v in zip(table.columns, group_counts)
+                        },
+                        "imbalance_ratio": float(present.max() / present.min()) if present.size else float("nan"),
+                        "missing_classes": [
+                            (c.item() if hasattr(c, "item") else c) for c, v in zip(table.columns, group_counts) if v == 0
+                        ],
+                    }
+                )
+            obs = table.to_numpy(dtype=float)
+            stat, p_value, dof, cramer = float("nan"), float("nan"), 0, float("nan")
+            if obs.shape[0] > 1 and obs.shape[1] > 1:
+                expected = obs.sum(axis=1, keepdims=True) * obs.sum(axis=0, keepdims=True) / obs.sum()
+                stat = float(np.sum((obs - expected) ** 2 / expected))
+                dof = (obs.shape[0] - 1) * (obs.shape[1] - 1)
+                from scipy.stats import chi2 as _chi2
+
+                p_value = float(_chi2.sf(stat, dof))
+                cramer = math.sqrt(stat / (obs.sum() * (min(obs.shape) - 1)))
+            result["by"] = {
+                "column": by,
+                "groups": groups,
+                "chi_square": stat,
+                "dof": int(dof),
+                "p_value": p_value,
+                "cramers_v": cramer,
+            }
+        return result
+
     def digit_heaping_report(
         self,
         data: pd.DataFrame,
