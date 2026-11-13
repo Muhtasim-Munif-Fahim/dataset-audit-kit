@@ -846,6 +846,19 @@ def build_parser() -> argparse.ArgumentParser:
     imbalance_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     imbalance_parser.add_argument("--fail-on-imbalance", action="store_true", help="Exit 1 if the target is imbalanced")
 
+    complexity_parser = subparsers.add_parser(
+        "complexity",
+        help="Data-complexity measures (Ho & Basu): feature overlap F1-F3, neighbourhood N1-N3, T2",
+    )
+    complexity_parser.add_argument("data", help="Path to the dataset")
+    complexity_parser.add_argument("--target", required=True, help="Classification target column")
+    complexity_parser.add_argument("--features", default=None, help="Comma-separated numeric feature columns (default: every numeric column)")
+    complexity_parser.add_argument("--max-rows", type=int, default=2000, help="Rows sampled for the distance-based measures (default: 2000)")
+    complexity_parser.add_argument("--n3-threshold", type=float, default=0.2, help="1-NN error above which the data is hard to separate (default: 0.2)")
+    complexity_parser.add_argument("--seed", type=int, default=0, help="Random seed for row sampling (default: 0)")
+    complexity_parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    complexity_parser.add_argument("--fail-on-hard", action="store_true", help="Exit 1 if N3 exceeds --n3-threshold")
+
     simpson_parser = subparsers.add_parser(
         "simpson",
         help="Detect Simpson's paradox: two-level factors whose effect on a target reverses within strata",
@@ -2215,6 +2228,53 @@ def _cmd_imbalance(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_complexity(args: argparse.Namespace) -> int:
+    """Handle the complexity subcommand (data-complexity measures)."""
+    import json
+
+    data = _load(args)
+    features = [c.strip() for c in args.features.split(",") if c.strip()] if args.features else None
+    try:
+        result = DatasetAuditor().data_complexity_report(
+            data,
+            args.target,
+            features=features,
+            max_rows=args.max_rows,
+            n3_threshold=args.n3_threshold,
+            seed=args.seed,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(
+            f"Data complexity for '{result['target']}': {result['n_classes']} class(es), "
+            f"{len(result['features'])} feature(s), {result['n_rows_used']} row(s) used"
+            + (" (sampled)" if result["sampled"] else "")
+        )
+        descriptions = {
+            "F1": "max Fisher discriminant ratio, 1/(1+r)",
+            "F2": "volume of overlapping region",
+            "F3": "max individual feature efficiency",
+            "N1": "MST borderline fraction",
+            "N2": "intra/extra NN distance ratio",
+            "N3": "leave-one-out 1-NN error",
+            "T2": "features per row",
+        }
+        table = pd.DataFrame(
+            [{"measure": m, "value": f"{v:.4f}", "meaning": descriptions[m]} for m, v in result["measures"].items()]
+        )
+        _render_table(table, "table")
+        print(f"Best single feature by Fisher ratio: {result['best_fisher_feature']} (r={_format_stat(result['max_fisher_ratio'])})")
+        print("Verdict: " + ("hard to separate" if result["hard_to_separate"] else "classes are reasonably separable")
+              + f" (N3 {'>' if result['hard_to_separate'] else '<='} {result['n3_threshold']})")
+    if args.fail_on_hard and result["hard_to_separate"]:
+        return 1
+    return 0
+
+
 def _cmd_simpson(args: argparse.Namespace) -> int:
     """Handle the simpson subcommand (Simpson's paradox scan)."""
     import json
@@ -3518,6 +3578,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_simpson(args)
     elif args.command == "imbalance":
         return _cmd_imbalance(args)
+    elif args.command == "complexity":
+        return _cmd_complexity(args)
     elif args.command == "mcar":
         return _cmd_mcar(args)
     elif args.command == "mmd-drift":
