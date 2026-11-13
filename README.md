@@ -42,6 +42,7 @@ This toolkit gives you a lightweight audit layer before you launch a training jo
 - **Label issues (confident learning)**: finds rows whose label is probably wrong from out-of-sample predicted probabilities (Northcutt et al. 2021) via the `label-issues` CLI: calibrated confident joint, estimated noise rate and ranked suspicious rows with suggested labels. Reproduces `cleanlab.filter.find_label_issues` without the dependency.
 - **Privacy / re-identification audit**: k-anonymity, distinct and entropy l-diversity, and t-closeness (Earth Mover's Distance) over quasi-identifiers via the `privacy` CLI, with prosecutor re-identification risk and the riskiest equivalence classes.
 - **Near-duplicate rows**: MinHash + LSH banding (Broder 1997; Indyk & Motwani 1998) via the `near-dups` CLI finds rows that are almost but not exactly identical (one edited field, a typo in a free-text column), verified with exact Jaccard and grouped into clusters with the columns that differ.
+- **Data complexity** (Ho & Basu 2002): model-free difficulty measures for a labelled dataset (feature overlap F1–F3, MST borderline N1, NN distance ratio N2, 1-NN error N3, T2) via the `complexity` CLI.
 - Configurable per-column validation rules with JSON-based rule files.
 - CI-friendly `check` command that exits with code 1 on issues.
 - CSV, JSONL/NDJSON, and Parquet dataset loading.
@@ -165,6 +166,25 @@ dataset-audit-kit imbalance data.csv --target label --fail-on-imbalance --ir-thr
 ```python
 res = DatasetAuditor().class_imbalance_report(df, "label", beta=0.999)
 res["imbalance_ratio"], res["severity"], [c["class_balanced_weight"] for c in res["classes"]]
+```
+
+### Data complexity (`complexity`)
+
+`complexity` measures how hard a classification dataset is before any model is trained, using the Ho & Basu (2002) measures with the Lorena et al. (2019) conventions (all in `[0, 1]`, higher = harder). Numeric features are min-max scaled; at most `--max-rows` rows are used.
+
+- Feature overlap: `F1` maximum Fisher discriminant ratio as `1/(1 + max r_j)`, `F2` volume of the class-pair overlap region, `F3` share of rows left in the overlap of the single best feature.
+- Neighbourhood: `N1` share of rows on a cross-class edge of the minimum spanning tree, `N2` intra- vs extra-class nearest-neighbour distance ratio `r/(1+r)`, `N3` leave-one-out 1-NN error.
+- `T2` features per row.
+
+```bash
+dataset-audit-kit complexity data.csv --target label
+dataset-audit-kit complexity data.csv --target label --features age,income --json
+dataset-audit-kit complexity data.csv --target label --fail-on-hard --n3-threshold 0.25
+```
+
+```python
+res = DatasetAuditor().data_complexity_report(df, "label")
+res["measures"]["N3"], res["best_fisher_feature"], res["hard_to_separate"]
 ```
 
 ### Simpson's paradox (`simpson`)

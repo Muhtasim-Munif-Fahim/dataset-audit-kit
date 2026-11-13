@@ -4141,6 +4141,171 @@ class DatasetAuditor:
         h2 = float(np.median(upper)) if upper.size else 1.0
         return np.exp(-d2 / h2), math.sqrt(h2 / 2.0)
 
+    def data_complexity_report(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        *,
+        features: Sequence[str] | None = None,
+        max_rows: int = 2000,
+        n3_threshold: float = 0.2,
+        seed: int = 0,
+    ) -> dict[str, object]:
+        """Classification data-complexity measures (Ho & Basu, 2002).
+
+        Answers "how hard is this labelled dataset, independent of any model?"
+        using the classic geometric measures, with the conventions of the
+        Lorena et al. (2019) survey (every measure lies in ``[0, 1]`` and
+        *higher means harder*):
+
+        * **Feature overlap** – ``F1`` maximum Fisher's discriminant ratio,
+          reported as ``1 / (1 + max_j r_j)`` with
+          ``r_j = sum_c n_c (mu_cj - mu_j)^2 / sum_c sum_i (x_ij - mu_cj)^2``
+          (``max_fisher_ratio`` gives the raw ``max r_j``); ``F2`` volume of
+          the per-feature overlap region of each class pair and ``F3`` the
+          maximum individual feature efficiency (fraction of rows still in the
+          overlap of the *best* feature), both averaged over class pairs.
+        * **Neighbourhood** – ``N1`` fraction of rows joined to a row of
+          another class in the Euclidean minimum spanning tree; ``N2``
+          ``r / (1 + r)`` with ``r`` the ratio of summed intra-class to
+          extra-class nearest-neighbour distances; ``N3`` leave-one-out 1-NN
+          error rate.
+        * **Dimensionality** – ``T2`` = features / rows.
+
+        Numeric feature columns are min-max scaled; rows with a missing
+        feature or label are dropped. At most ``max_rows`` rows (random
+        sample with ``seed``) are used, because ``N1``–``N3`` need the full
+        pairwise distance matrix. ``hard_to_separate`` is ``N3 > n3_threshold``.
+        """
+        if target not in data.columns:
+            raise ValueError(f"unknown column: {target!r}")
+        if not isinstance(max_rows, int) or isinstance(max_rows, bool) or max_rows < 4:
+            raise ValueError("max_rows must be an integer >= 4")
+        if not 0.0 <= float(n3_threshold) <= 1.0:
+            raise ValueError("n3_threshold must be in [0, 1]")
+        if features is None:
+            cols = [c for c in data.columns if c != target and pd.api.types.is_numeric_dtype(data[c])
+                    and not pd.api.types.is_bool_dtype(data[c])]
+        else:
+            cols = list(features)
+            missing = [c for c in cols if c not in data.columns]
+            if missing:
+                raise ValueError(f"unknown column(s): {missing}")
+            if target in cols:
+                raise ValueError("target must not be listed in features")
+            bad = [c for c in cols if not pd.api.types.is_numeric_dtype(data[c])]
+            if bad:
+                raise ValueError(f"non-numeric feature column(s): {bad}")
+        if not cols:
+            raise ValueError("no numeric feature columns to analyse")
+        excluded = [c for c in data.columns if c != target and c not in cols]
+
+        frame = data[cols + [target]].dropna()
+        n_dropped = int(len(data) - len(frame))
+        if len(frame) > max_rows:
+            frame = frame.sample(n=max_rows, random_state=seed)
+        y_raw = frame[target].to_numpy()
+        classes, y = np.unique(y_raw.astype(str), return_inverse=True)
+        if classes.size < 2:
+            raise ValueError("need at least two classes with complete rows")
+        X = frame[cols].to_numpy(dtype=float)
+        lo, hi = X.min(axis=0), X.max(axis=0)
+        span = np.where(hi > lo, hi - lo, 1.0)
+        X = (X - lo) / span
+        n, d = X.shape
+        k = int(classes.size)
+
+        # F1: maximum Fisher discriminant ratio (multi-class form).
+        mu = X.mean(axis=0)
+        between = np.zeros(d)
+        within = np.zeros(d)
+        for c in range(k):
+            Xc = X[y == c]
+            between += Xc.shape[0] * (Xc.mean(axis=0) - mu) ** 2
+            within += ((Xc - Xc.mean(axis=0)) ** 2).sum(axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(within > 1e-12, between / np.where(within > 1e-12, within, 1.0),
+                             np.where(between > 1e-12, np.inf, 0.0))
+        max_ratio = float(ratio.max())
+        f1 = 0.0 if math.isinf(max_ratio) else 1.0 / (1.0 + max_ratio)
+
+        # F2 / F3 over class pairs (one-vs-one).
+        f2_vals, f3_vals = [], []
+        for a in range(k):
+            for b in range(a + 1, k):
+                Xa, Xb = X[y == a], X[y == b]
+                minmax = np.minimum(Xa.max(axis=0), Xb.max(axis=0))
+                maxmin = np.maximum(Xa.min(axis=0), Xb.min(axis=0))
+                maxmax = np.maximum(Xa.max(axis=0), Xb.max(axis=0))
+                minmin = np.minimum(Xa.min(axis=0), Xb.min(axis=0))
+                overlap = np.maximum(0.0, minmax - maxmin)
+                rng_ = maxmax - minmin
+                frac = np.where(rng_ > 0, overlap / np.where(rng_ > 0, rng_, 1.0), 1.0)
+                f2_vals.append(float(np.prod(frac)))
+                Xab = np.vstack([Xa, Xb])
+                inside = (Xab >= maxmin) & (Xab <= minmax)
+                inside &= (minmax >= maxmin)  # no overlap region -> nobody inside
+                f3_vals.append(float(inside.sum(axis=0).min() / Xab.shape[0]))
+        f2 = float(np.mean(f2_vals))
+        f3 = float(np.mean(f3_vals))
+
+        # Pairwise distances for N1-N3.
+        sq = np.sum(X * X, axis=1)
+        D = np.sqrt(np.maximum(sq[:, None] + sq[None, :] - 2.0 * X @ X.T, 0.0))
+        np.fill_diagonal(D, np.inf)
+
+        # N1: Prim's MST, count rows touching a cross-class edge.
+        in_tree = np.zeros(n, dtype=bool)
+        best = np.full(n, np.inf)
+        parent = np.full(n, -1)
+        best[0] = 0.0
+        borderline = np.zeros(n, dtype=bool)
+        for _ in range(n):
+            cand = np.where(in_tree, np.inf, best)
+            u = int(np.argmin(cand))
+            in_tree[u] = True
+            if parent[u] >= 0 and y[parent[u]] != y[u]:
+                borderline[u] = borderline[parent[u]] = True
+            upd = (~in_tree) & (D[u] < best)
+            best[upd] = D[u][upd]
+            parent[upd] = u
+        n1 = float(borderline.mean())
+
+        # N2 and N3.
+        same = y[:, None] == y[None, :]
+        intra = np.where(same, D, np.inf).min(axis=1)
+        extra = np.where(~same, D, np.inf).min(axis=1)
+        finite_intra = np.isfinite(intra)
+        intra_sum = float(intra[finite_intra].sum())
+        extra_sum = float(extra.sum())
+        r = intra_sum / extra_sum if extra_sum > 0 else float("inf")
+        n2 = 1.0 if math.isinf(r) else r / (1.0 + r)
+        nn = np.argmin(D, axis=1)
+        n3 = float(np.mean(y[nn] != y))
+
+        measures = {
+            "F1": f1, "F2": f2, "F3": f3,
+            "N1": n1, "N2": float(n2), "N3": n3,
+            "T2": float(d / n),
+        }
+        return {
+            "target": target,
+            "features": cols,
+            "excluded_columns": excluded,
+            "n_rows_used": int(n),
+            "n_rows_dropped_missing": n_dropped,
+            "sampled": bool(len(data) - n_dropped > n),
+            "n_classes": k,
+            "classes": [str(c) for c in classes],
+            "measures": measures,
+            "max_fisher_ratio": max_ratio,
+            "best_fisher_feature": cols[int(np.argmax(ratio))],
+            "fisher_ratio_by_feature": {c: float(v) for c, v in zip(cols, ratio)},
+            "borderline_rows": int(borderline.sum()),
+            "n3_threshold": float(n3_threshold),
+            "hard_to_separate": bool(n3 > float(n3_threshold)),
+        }
+
     def mmd_drift_report(
         self,
         data: pd.DataFrame,
